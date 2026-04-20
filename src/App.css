@@ -187,13 +187,127 @@ body {
   line-height: 1.5;
 }
 
-/* ----- Mobile ----- */
-@media (max-width: 640px) {
-  .main-content {
-    padding: 2rem 1.5rem;
+/* ===== Responsive ===== */
+
+/* Tablet — 768px */
+@media (max-width: 768px) {
+  .page {
+    width: 100%;
+    padding: 1rem 1.25rem 2rem;
   }
-  .page-title {
-    font-size: 2rem;
+
+  .parcel-form {
+    max-width: 100%;
+  }
+
+  .product-grid {
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  }
+
+  .detail-nav {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  /* Horizontally scroll the product table instead of breaking layout */
+  .multi-product-table {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .mpt-header,
+  .mpt-row,
+  .mpt-total {
+    min-width: 560px;
+  }
+
+  .multi-config-actions {
+    flex-wrap: wrap;
+  }
+}
+
+/* Phone — 480px */
+@media (max-width: 480px) {
+  .step1-title {
+    font-size: 1.75rem;
+    margin-bottom: 1rem;
+  }
+
+  /* Step bar: hide labels, keep numbered circles + connectors */
+  .step-bar-label {
+    display: none;
+  }
+
+  .step-bar {
+    padding: 0.5rem 0.75rem;
+  }
+
+  .page {
+    padding: 0.75rem 0.9rem 2rem;
+  }
+
+  /* Parcel card: stack shape above stats on narrow screens */
+  .parcel-card-body {
+    flex-direction: column;
+  }
+
+  .parcel-shape-wrap {
+    width: 100%;
+    flex: none;
+  }
+
+  .parcel-shape-svg {
+    max-height: 140px;
+    object-fit: contain;
+  }
+
+  /* Product grid: single column */
+  .product-grid {
+    grid-template-columns: 1fr;
+  }
+
+  /* Detail nav buttons stack */
+  .detail-nav-right {
+    flex-wrap: wrap;
+    width: 100%;
+  }
+
+  .reset-btn,
+  .email-overview-lg {
+    flex: 1;
+    text-align: center;
+    justify-content: center;
+  }
+
+  /* Combined bar: wrap */
+  .combined-bar {
+    flex-wrap: wrap;
+  }
+
+  .combined-btn,
+  .combined-clear {
+    flex: 1;
+    text-align: center;
+  }
+
+  /* Config panel actions */
+  .multi-config-actions {
+    flex-direction: column;
+  }
+
+  .multi-config-actions button {
+    width: 100%;
+    text-align: center;
+  }
+
+  /* Birds-eye wrap: tighter padding */
+  .birds-eye-wrap {
+    padding: 0.5rem;
+  }
+
+  /* Gear button top bar */
+  .top-bar {
+    padding: 0 0.5rem;
   }
 }
 
