@@ -5,7 +5,7 @@ const SVG_H = 420;
 const LABEL_PAD = 56;
 
 const COLORS = [
-  { fill: 'rgba(56,189,248,0.5)',  stroke: '#38bdf8', text: '#0ea5e9', roof: '#bfe8fa' },
+  { fill: 'rgba(29,44,243,0.5)',   stroke: '#1d2cf3', text: '#1e40af', roof: '#c7d2fe' },
   { fill: 'rgba(52,211,153,0.5)',  stroke: '#34d399', text: '#10b981', roof: '#bbf7d0' },
   { fill: 'rgba(251,191,36,0.5)',  stroke: '#fbbf24', text: '#d97706', roof: '#fef08a' },
   { fill: 'rgba(248,113,113,0.5)', stroke: '#f87171', text: '#ef4444', roof: '#fecaca' },
@@ -47,7 +47,7 @@ function Trees({ ox, oy, pW, pH, sbFront, sbRear, sbSide, scale, count = 14 }) {
   );
 }
 
-function Building({ pl, color, scale, buildX, buildY, xPx, yPx, rotation, isDragging, isRotating, onMouseDown, onRotateStart }) {
+function Building({ pl, color, scale, buildX, buildY, xPx, yPx, rotation, isDragging, isRotating, onMouseDown, onRotateStart, productName }) {
   const sx = buildX + xPx;
   const sy = buildY + yPx;
   const sw = pl.widthFt * scale;
@@ -116,38 +116,73 @@ function Building({ pl, color, scale, buildX, buildY, xPx, yPx, rotation, isDrag
             fill="#3a4a50" stroke="rgba(0,0,0,0.4)" strokeWidth="0.5" rx="1" />
         )}
 
-        {/* Label */}
-        {sw > 30 && sh > 20 && (
-          <text x={cx} y={cy + 4} textAnchor="middle"
-            fill="#ffffff" fontSize="8" fontWeight="700"
-            style={{ textShadow: '0 0 4px rgba(0,0,0,0.9)', pointerEvents: 'none' }}>
+        {/* Label — small name on top, smaller size below */}
+        {sw > 40 && sh > 22 && productName ? (
+          <g style={{ pointerEvents: 'none' }}>
+            <text x={cx} y={cy - 1} textAnchor="middle"
+              fill="#ffffff" fontSize="6" fontWeight="700"
+              style={{ textShadow: '0 0 3px rgba(0,0,0,0.95)' }}>
+              {productName}
+            </text>
+            <text x={cx} y={cy + 6} textAnchor="middle"
+              fill="#ffffff" fontSize="5" fontWeight="500"
+              style={{ textShadow: '0 0 3px rgba(0,0,0,0.95)' }}>
+              {pl.widthFt}′×{pl.depthFt}′
+            </text>
+          </g>
+        ) : sw > 24 && sh > 14 ? (
+          <text x={cx} y={cy + 2} textAnchor="middle"
+            fill="#ffffff" fontSize="6" fontWeight="600"
+            style={{ textShadow: '0 0 3px rgba(0,0,0,0.95)', pointerEvents: 'none' }}>
             {pl.widthFt}′×{pl.depthFt}′
           </text>
-        )}
+        ) : null}
       </g>
 
-      {/* Rotate handle — stem + circle above north edge */}
-      <g onMouseDown={onRotateStart} style={{ cursor: 'crosshair', userSelect: 'none' }}>
-        <line x1={cx} y1={sy} x2={cx} y2={sy - 16}
-          stroke={isRotating ? 'rgba(251,191,36,0.9)' : 'rgba(255,255,255,0.55)'} strokeWidth="1.2" />
-        <circle cx={cx} cy={sy - 16} r={isRotating ? 6 : 5}
-          fill={isRotating ? '#fbbf24' : 'rgba(255,255,255,0.85)'}
-          stroke={isRotating ? '#d97706' : '#64748b'} strokeWidth="1" />
-        {/* ↻ symbol */}
-        <text x={cx} y={sy - 12} textAnchor="middle"
-          fill={isRotating ? '#92400e' : '#334155'} fontSize="7" fontWeight="700"
-          style={{ pointerEvents: 'none' }}>
-          ↻
-        </text>
+      {/* Rotate handle — modern circular grip */}
+      <g onMouseDown={onRotateStart} style={{ cursor: 'grab', userSelect: 'none' }}>
+        {/* Connector */}
+        <line x1={cx} y1={sy} x2={cx} y2={sy - 22}
+          stroke={isRotating ? '#1d2cf3' : 'rgba(15,23,42,0.45)'}
+          strokeWidth="1.4"
+          strokeLinecap="round"
+          strokeDasharray={isRotating ? 'none' : '2 3'} />
+
+        {/* Soft outer halo */}
+        <circle cx={cx} cy={sy - 22} r={isRotating ? 11 : 9}
+          fill={isRotating ? 'rgba(29,44,243,0.18)' : 'rgba(15,23,42,0.08)'} />
+
+        {/* Main handle */}
+        <circle cx={cx} cy={sy - 22} r="7.5"
+          fill={isRotating ? '#1d2cf3' : '#ffffff'}
+          stroke={isRotating ? '#1d2cf3' : '#374151'}
+          strokeWidth="1.5" />
+
+        {/* Curved rotation arrow */}
+        <g transform={`translate(${cx}, ${sy - 22})`} style={{ pointerEvents: 'none' }}>
+          <path
+            d="M -3.2 -0.5 A 3.2 3.2 0 1 1 0.8 3.1"
+            fill="none"
+            stroke={isRotating ? '#ffffff' : '#374151'}
+            strokeWidth="1.3"
+            strokeLinecap="round"
+          />
+          <polygon
+            points="0.8,3.1 -0.6,3.7 1.4,4.6"
+            fill={isRotating ? '#ffffff' : '#374151'}
+          />
+        </g>
       </g>
 
-      {/* Rotation angle badge — shown while rotating */}
+      {/* Rotation angle badge — pill-style, brand blue */}
       {isRotating && (
-        <g>
-          <rect x={cx - 16} y={sy - 36} width={32} height={14} rx="3"
-            fill="rgba(251,191,36,0.92)" />
-          <text x={cx} y={sy - 25} textAnchor="middle"
-            fill="#78350f" fontSize="8" fontWeight="700" style={{ pointerEvents: 'none' }}>
+        <g style={{ pointerEvents: 'none' }}>
+          <rect x={cx - 22} y={sy - 50} width={44} height={20} rx="10"
+            fill="#1d2cf3" />
+          <rect x={cx - 22} y={sy - 50} width={44} height={20} rx="10"
+            fill="none" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
+          <text x={cx} y={sy - 36} textAnchor="middle"
+            fill="#ffffff" fontSize="10" fontWeight="700" letterSpacing="0.5">
             {Math.round(((rotation % 360) + 360) % 360)}°
           </text>
         </g>
@@ -174,6 +209,19 @@ function clampRotated(xPx, yPx, sw, sh, angleDeg, areaW, areaH) {
     xPx: Math.max(hw - sw / 2, Math.min(areaW - sw / 2 - hw, xPx)),
     yPx: Math.max(hh - sh / 2, Math.min(areaH - sh / 2 - hh, yPx)),
   };
+}
+
+// Axis-aligned bounding box of a rotated rectangle, centred on (cx, cy)
+function rotatedBBox(cx, cy, sw, sh, angleDeg) {
+  const rad = angleDeg * Math.PI / 180;
+  const c = Math.abs(Math.cos(rad)), s = Math.abs(Math.sin(rad));
+  const bw = sw * c + sh * s;
+  const bh = sw * s + sh * c;
+  return { x: cx - bw / 2, y: cy - bh / 2, w: bw, h: bh };
+}
+
+function bboxesOverlap(a, b) {
+  return !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
 }
 
 
@@ -243,6 +291,41 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
     setActiveMode('rotate');
   }
 
+  // Per-product spacing lookup (in feet, defaults to 0)
+  const DEFAULT_SPACING = { front: 0, back: 0, left: 0, right: 0 };
+  const spacingMap = Object.fromEntries(products.map((p) => [p.id, p.spacing ?? DEFAULT_SPACING]));
+  const getSpacing = (id) => spacingMap[id] ?? DEFAULT_SPACING;
+
+  // Compute every other building's rotated AABB plus its productId for spacing lookups
+  function otherBBoxes(skipIdx) {
+    return placements
+      .map((pl, i) => {
+        if (i === skipIdx) return null;
+        const pos = posFt[i] ?? { xFt: 0, yFt: 0 };
+        const sw  = pl.widthFt * scale;
+        const sh  = pl.depthFt * scale;
+        const cx  = pos.xFt * scale + sw / 2;
+        const cy  = pos.yFt * scale + sh / 2;
+        const bb  = rotatedBBox(cx, cy, sw, sh, rotations[i] ?? 0);
+        return { ...bb, productId: pl.productId };
+      })
+      .filter(Boolean);
+  }
+
+  // Conflict check using per-product, per-side spacing.
+  // Required gap between A and B = max of the two sides facing each other.
+  function bboxesConflict(a, b, sa, sb) {
+    const aRight = sa.right * scale, aLeft = sa.left * scale;
+    const aFront = sa.front * scale, aBack = sa.back * scale;
+    const bRight = sb.right * scale, bLeft = sb.left * scale;
+    const bFront = sb.front * scale, bBack = sb.back * scale;
+    if (a.x + a.w + Math.max(aRight, bLeft) <= b.x) return false;
+    if (b.x + b.w + Math.max(bRight, aLeft) <= a.x) return false;
+    if (a.y + a.h + Math.max(aFront, bBack) <= b.y) return false;
+    if (b.y + b.h + Math.max(bFront, aBack) <= a.y) return false;
+    return true;
+  }
+
   function handleMouseMove(e) {
     const d = dragRef.current;
     if (!d) return;
@@ -257,6 +340,11 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
         pt.x - buildX - d.offsetX, pt.y - buildY - d.offsetY,
         sw, sh, rot, buildW, buildH
       );
+      // Reject if new position violates spacing with any other building
+      const myBBox = rotatedBBox(nx + sw / 2, ny + sh / 2, sw, sh, rot);
+      const mySpacing = getSpacing(pl.productId);
+      if (otherBBoxes(d.idx).some((b) => bboxesConflict(myBBox, b, mySpacing, getSpacing(b.productId)))) return;
+
       setPosFt((prev) => {
         const next = [...prev];
         next[d.idx] = { xFt: nx / scale, yFt: ny / scale };
@@ -267,23 +355,31 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
       const pl  = placements[d.idx];
       const sw  = pl.widthFt * scale;
       const sh  = pl.depthFt * scale;
+      const pos = posFt[d.idx];
+      if (!pos) return;
+
+      // Re-clamp position with the new rotation so the building stays inside
+      const { xPx: nx, yPx: ny } = clampRotated(
+        pos.xFt * scale, pos.yFt * scale, sw, sh, angle, buildW, buildH
+      );
+
+      // Reject if new rotation violates spacing
+      const myBBox = rotatedBBox(nx + sw / 2, ny + sh / 2, sw, sh, angle);
+      const mySpacing = getSpacing(pl.productId);
+      if (otherBBoxes(d.idx).some((b) => bboxesConflict(myBBox, b, mySpacing, getSpacing(b.productId)))) return;
+
       setRotations((prev) => {
         const next = [...prev];
         next[d.idx] = angle;
         return next;
       });
-      // Re-clamp position with the new rotation so the building stays inside
-      setPosFt((prev) => {
-        const pos = prev[d.idx];
-        if (!pos) return prev;
-        const { xPx: nx, yPx: ny } = clampRotated(
-          pos.xFt * scale, pos.yFt * scale, sw, sh, angle, buildW, buildH
-        );
-        if (Math.abs(nx - pos.xFt * scale) < 0.01 && Math.abs(ny - pos.yFt * scale) < 0.01) return prev;
-        const next = [...prev];
-        next[d.idx] = { xFt: nx / scale, yFt: ny / scale };
-        return next;
-      });
+      if (Math.abs(nx - pos.xFt * scale) > 0.01 || Math.abs(ny - pos.yFt * scale) > 0.01) {
+        setPosFt((prev) => {
+          const next = [...prev];
+          next[d.idx] = { xFt: nx / scale, yFt: ny / scale };
+          return next;
+        });
+      }
     }
   }
 
@@ -357,10 +453,147 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
               rotation={rotations[i] ?? 0}
               isDragging={activeIdx === i && activeMode === 'drag'}
               isRotating={activeIdx === i && activeMode === 'rotate'}
+              productName={productMap[pl.productId]?.name}
               onMouseDown={(e) => handleDragStart(e, i)}
               onRotateStart={(e) => handleRotateStart(e, i)} />
           );
         })}
+
+        {/* ── Distance overlay (sides + corners) — shown during drag or rotate ── */}
+        {(activeMode === 'drag' || activeMode === 'rotate') && activeIdx !== null && (() => {
+          const pl  = placements[activeIdx];
+          const pos = posFt[activeIdx];
+          if (!pl || !pos) return null;
+
+          const sw  = pl.widthFt * scale;
+          const sh  = pl.depthFt * scale;
+          const rot = rotations[activeIdx] ?? 0;
+          const cx  = pos.xFt * scale + sw / 2;
+          const cy  = pos.yFt * scale + sh / 2;
+          const bb  = rotatedBBox(cx, cy, sw, sh, rot);
+          const others = otherBBoxes(activeIdx);
+
+          // For each side, find the nearest obstacle position (boundary or other building edge)
+          // Returns position in buildX/buildY-relative pixel space.
+          function nearest(side) {
+            let edge;
+            if (side === 'left')   edge = 0;
+            if (side === 'right')  edge = buildW;
+            if (side === 'top')    edge = 0;
+            if (side === 'bottom') edge = buildH;
+            for (const o of others) {
+              if (side === 'left' || side === 'right') {
+                const vOverlap = Math.max(bb.y, o.y) < Math.min(bb.y + bb.h, o.y + o.h);
+                if (!vOverlap) continue;
+                if (side === 'left'  && o.x + o.w <= bb.x && o.x + o.w > edge) edge = o.x + o.w;
+                if (side === 'right' && o.x >= bb.x + bb.w && o.x < edge)      edge = o.x;
+              } else {
+                const hOverlap = Math.max(bb.x, o.x) < Math.min(bb.x + bb.w, o.x + o.w);
+                if (!hOverlap) continue;
+                if (side === 'top'    && o.y + o.h <= bb.y && o.y + o.h > edge) edge = o.y + o.h;
+                if (side === 'bottom' && o.y >= bb.y + bb.h && o.y < edge)      edge = o.y;
+              }
+            }
+            return edge;
+          }
+
+          const obsLeft   = nearest('left');
+          const obsRight  = nearest('right');
+          const obsTop    = nearest('top');     // 'back' / rear
+          const obsBottom = nearest('bottom');  // 'front'
+
+          const gapLeft   = Math.max(0, Math.round((bb.x - obsLeft) / scale));
+          const gapRight  = Math.max(0, Math.round((obsRight - bb.x - bb.w) / scale));
+          const gapBack   = Math.max(0, Math.round((bb.y - obsTop) / scale));
+          const gapFront  = Math.max(0, Math.round((obsBottom - bb.y - bb.h) / scale));
+
+          // Absolute SVG coordinates
+          const bx = buildX + bb.x;
+          const by = buildY + bb.y;
+          const bw = bb.w;
+          const bh = bb.h;
+
+          // Corner: distance from each corner to nearest other building's nearest point
+          const cornerDist = (cornerX, cornerY) => {
+            if (others.length === 0) return null;
+            let min = Infinity;
+            for (const o of others) {
+              const dx = Math.max(o.x - cornerX, 0, cornerX - (o.x + o.w));
+              const dy = Math.max(o.y - cornerY, 0, cornerY - (o.y + o.h));
+              const d  = Math.sqrt(dx * dx + dy * dy);
+              if (d < min) min = d;
+            }
+            return Math.round(min / scale);
+          };
+
+          const cTL = cornerDist(bb.x,        bb.y);
+          const cTR = cornerDist(bb.x + bb.w, bb.y);
+          const cBL = cornerDist(bb.x,        bb.y + bb.h);
+          const cBR = cornerDist(bb.x + bb.w, bb.y + bb.h);
+
+          const Pill = ({ x, y, text, accent }) => (
+            <g>
+              <rect x={x - 9} y={y - 5} width={18} height={10} rx="2"
+                fill={accent ? '#1d2cf3' : 'rgba(15,23,42,0.88)'} />
+              <text x={x} y={y + 3} textAnchor="middle"
+                fill="#ffffff" fontSize="6" fontWeight="700">
+                {text}
+              </text>
+            </g>
+          );
+
+          const Tick = ({ x1, y1, x2, y2 }) => (
+            <line x1={x1} y1={y1} x2={x2} y2={y2}
+              stroke="rgba(29,44,243,0.85)" strokeWidth="1" strokeDasharray="3 2" />
+          );
+
+          // Tick endpoints (absolute) — go to nearest obstacle, not all the way to boundary
+          const tickTopY    = buildY + obsTop;
+          const tickBottomY = buildY + obsBottom;
+          const tickLeftX   = buildX + obsLeft;
+          const tickRightX  = buildX + obsRight;
+
+          // Pill inset from each edge (pulled inside the building)
+          const SIDE_INSET   = 6;
+          const CORNER_INSET = 11;
+
+          return (
+            <g style={{ pointerEvents: 'none' }}>
+              {/* Dotted tick lines stay OUTSIDE — from building edge to obstacle */}
+              <Tick x1={bx + bw / 2} y1={by}      x2={bx + bw / 2} y2={tickTopY} />
+              <Tick x1={bx + bw / 2} y1={by + bh} x2={bx + bw / 2} y2={tickBottomY} />
+              <Tick x1={bx}          y1={by + bh / 2} x2={tickLeftX}  y2={by + bh / 2} />
+              <Tick x1={bx + bw}     y1={by + bh / 2} x2={tickRightX} y2={by + bh / 2} />
+
+              {/* Hide pills that would overlap given the building's current size */}
+              {/* Top/bottom side pills need a clear vertical strip */}
+              {bh >= 22 && (
+                <>
+                  <Pill x={bx + bw / 2} y={by + SIDE_INSET}      text={`${gapBack}'`}  accent />
+                  <Pill x={bx + bw / 2} y={by + bh - SIDE_INSET} text={`${gapFront}'`} accent />
+                </>
+              )}
+              {/* Left/right side pills need a clear horizontal strip */}
+              {bw >= 40 && (
+                <>
+                  <Pill x={bx + SIDE_INSET + 5}      y={by + bh / 2} text={`${gapLeft}'`}  accent />
+                  <Pill x={bx + bw - SIDE_INSET - 5} y={by + bh / 2} text={`${gapRight}'`} accent />
+                </>
+              )}
+
+              {/* Corner pills only if the building is large enough that they
+                  won't run into the centred side pills */}
+              {bw >= 58 && bh >= 32 && (
+                <>
+                  {cTL !== null && <Pill x={bx + CORNER_INSET}      y={by + 6}        text={`${cTL}'`} />}
+                  {cTR !== null && <Pill x={bx + bw - CORNER_INSET} y={by + 6}        text={`${cTR}'`} />}
+                  {cBL !== null && <Pill x={bx + CORNER_INSET}      y={by + bh - 6}   text={`${cBL}'`} />}
+                  {cBR !== null && <Pill x={bx + bw - CORNER_INSET} y={by + bh - 6}   text={`${cBR}'`} />}
+                </>
+              )}
+            </g>
+          );
+        })()}
 
         {/* ── Loading overlay ── */}
         {isLoading && (

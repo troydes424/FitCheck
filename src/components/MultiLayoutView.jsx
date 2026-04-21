@@ -135,11 +135,6 @@ export default function MultiLayoutView({ products, parcel, setbacks, apiKey, ma
       {/* ── Birds-eye view ── */}
       <div className="detail-bev">
         <h3 className="detail-section-label">Site Layout</h3>
-        <p className="detail-bev-note">
-          Illustrative combined layout based on parcel bounding box and estimated footprints.
-          Actual placement subject to site conditions and local zoning.
-          {!apiKey && ' Add a Claude API key in AI Settings for AI-optimised placement.'}
-        </p>
         <BirdsEyeSVG
           parcel={parcel}
           setbacks={setbacks}

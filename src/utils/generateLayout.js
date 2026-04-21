@@ -1,6 +1,5 @@
 const MODEL = 'claude-haiku-4-5-20251001';
-const GAP_X = 7; // minimum ft between buildings left/right (sides)
-const GAP_Y = 5; // minimum ft between buildings front/back
+const DEFAULT_SPACING = { front: 10, back: 10, left: 10, right: 10 };
 
 // ── Geometry helpers ──────────────────────────────────────────────────────────
 
@@ -11,14 +10,26 @@ function getBuildable(parcel, setbacks) {
   };
 }
 
-// Returns true if two placements are within gap distance of each other (or overlapping)
-function conflicts(a, b) {
-  return !(
-    a.xFt + a.widthFt + GAP_X <= b.xFt ||
-    b.xFt + b.widthFt + GAP_X <= a.xFt ||
-    a.yFt + a.depthFt + GAP_Y <= b.yFt ||
-    b.yFt + b.depthFt + GAP_Y <= a.yFt
-  );
+// Build a (productId) → { front, back, left, right } lookup
+function makeGetSpacing(products) {
+  const map = Object.fromEntries(products.map((p) => [p.id, p.spacing ?? DEFAULT_SPACING]));
+  return (id) => map[id] ?? DEFAULT_SPACING;
+}
+
+// Returns true if two placements overlap or are too close, using per-product
+// per-side spacing. Required gap between two buildings = max of the two facing sides.
+function conflicts(a, b, getSpacing) {
+  const sa = getSpacing(a.productId);
+  const sb = getSpacing(b.productId);
+  // a left of b → gap = max(a.right, b.left)
+  if (a.xFt + a.widthFt + Math.max(sa.right, sb.left) <= b.xFt) return false;
+  // b left of a → gap = max(b.right, a.left)
+  if (b.xFt + b.widthFt + Math.max(sb.right, sa.left) <= a.xFt) return false;
+  // a behind b (lower y) → gap = max(a.front, b.back)
+  if (a.yFt + a.depthFt + Math.max(sa.front, sb.back) <= b.yFt) return false;
+  // b behind a → gap = max(b.front, a.back)
+  if (b.yFt + b.depthFt + Math.max(sb.front, sa.back) <= a.yFt) return false;
+  return true;
 }
 
 // ── Corner-point packer ───────────────────────────────────────────────────────
@@ -26,20 +37,23 @@ function conflicts(a, b) {
 // method: candidate positions are derived from existing building edges + GAP,
 // which guarantees no valid placement is ever skipped.
 
-function packProduct(existing, product, buildableW, buildableD, maxCount, maxCoveredSqFt) {
+function packProduct(existing, product, buildableW, buildableD, maxCount, maxCoveredSqFt, getSpacing) {
   const placed = [...existing];
   let count = placed.filter((p) => p.productId === product.id).length;
+  const newSpacing = product.spacing ?? DEFAULT_SPACING;
 
   let improved = true;
   while (improved && count < maxCount) {
     improved = false;
 
     // Candidate x/y positions: origin + right/bottom edge of every placed building
+    // (gap = max of placed-building's facing side and new product's facing side)
     const xs = new Set([0]);
     const ys = new Set([0]);
     for (const p of placed) {
-      const rx = p.xFt + p.widthFt + GAP_X;
-      const ry = p.yFt + p.depthFt + GAP_Y;
+      const ps = getSpacing(p.productId);
+      const rx = p.xFt + p.widthFt + Math.max(ps.right, newSpacing.left);
+      const ry = p.yFt + p.depthFt + Math.max(ps.front, newSpacing.back);
       if (rx + product.footprintW <= buildableW + 0.01) xs.add(rx);
       if (ry + product.footprintD <= buildableD + 0.01) ys.add(ry);
     }
@@ -65,7 +79,7 @@ function packProduct(existing, product, buildableW, buildableD, maxCount, maxCov
           depthFt: product.footprintD,
         };
 
-        if (!placed.some((p) => conflicts(p, candidate))) {
+        if (!placed.some((p) => conflicts(p, candidate, getSpacing))) {
           placed.push(candidate);
           count++;
           improved = true;
@@ -98,10 +112,11 @@ function buildSummary(placements, parcel, products, source, notes) {
 function gridLayout(parcel, products, setbacks) {
   const { w: buildableW, d: buildableD } = getBuildable(parcel, setbacks);
   const maxCoveredSqFt = parcel.sqft * 0.5;
+  const getSpacing = makeGetSpacing(products);
 
   let placements = [];
   for (const product of products) {
-    placements = packProduct(placements, product, buildableW, buildableD, product.count ?? 99, maxCoveredSqFt);
+    placements = packProduct(placements, product, buildableW, buildableD, product.count ?? 99, maxCoveredSqFt, getSpacing);
   }
 
   return buildSummary(placements, parcel, products, 'grid', 'Grid layout');
@@ -115,6 +130,7 @@ function refineLayout(rawPlacements, parcel, products, setbacks) {
   const { w: buildableW, d: buildableD } = getBuildable(parcel, setbacks);
   const maxCoveredSqFt = parcel.sqft * 0.5;
   const productMap     = Object.fromEntries(products.map((p) => [p.id, p]));
+  const getSpacing     = makeGetSpacing(products);
 
   // Step 1: keep only valid, non-overlapping placements
   const valid = [];
@@ -124,7 +140,7 @@ function refineLayout(rawPlacements, parcel, products, setbacks) {
     if (pl.xFt < -0.01 || pl.yFt < -0.01) continue;
     if (pl.xFt + pl.widthFt > buildableW + 0.1) continue;
     if (pl.yFt + pl.depthFt > buildableD + 0.1) continue;
-    if (valid.some((p) => conflicts(p, pl))) continue;
+    if (valid.some((p) => conflicts(p, pl, getSpacing))) continue;
     const covered = valid.reduce((s, p) => s + p.widthFt * p.depthFt, 0);
     if (covered + pl.widthFt * pl.depthFt > maxCoveredSqFt) continue;
     valid.push(pl);
@@ -133,7 +149,7 @@ function refineLayout(rawPlacements, parcel, products, setbacks) {
   // Step 2: fill remaining space for every product
   let placements = valid;
   for (const product of products) {
-    placements = packProduct(placements, product, buildableW, buildableD, product.count ?? 99, maxCoveredSqFt);
+    placements = packProduct(placements, product, buildableW, buildableD, product.count ?? 99, maxCoveredSqFt, getSpacing);
   }
 
   return placements;
@@ -147,9 +163,10 @@ function buildPrompt(parcel, products, setbacks, userNotes) {
   const maxCoveredSqFt = Math.round(parcel.sqft * 0.5);
 
   const productLines = products
-    .map((p) =>
-      `  - id:"${p.id}" name:"${p.name}" w:${p.footprintW}ft d:${p.footprintD}ft units:${p.units} requested:${p.count ?? 99}`
-    )
+    .map((p) => {
+      const s = p.spacing ?? DEFAULT_SPACING;
+      return `  - id:"${p.id}" name:"${p.name}" w:${p.footprintW}ft d:${p.footprintD}ft units:${p.units} requested:${p.count ?? 99} spacing:{front:${s.front},back:${s.back},left:${s.left},right:${s.right}}`;
+    })
     .join('\n');
 
   const notesSection = userNotes?.trim()
@@ -169,8 +186,10 @@ ${productLines}
 HARD RULES — all mandatory:
 1. Every building must fit entirely within the buildable area:
    xFt >= 0, yFt >= 0, xFt + widthFt <= ${buildableW}, yFt + depthFt <= ${buildableD}
-2. Minimum ${GAP_X}ft gap between buildings side-to-side (left/right).
-   Minimum ${GAP_Y}ft gap between buildings front-to-back (top/bottom).
+2. Each product has per-side spacing requirements (front/back/left/right in feet).
+   Required gap between buildings A and B = max(A.facing-side, B.facing-side):
+     • A left of B   → gap = max(A.right, B.left)
+     • A above B (lower y) → gap = max(A.front, B.back)
    No overlaps allowed.
 3. Total footprint area <= ${maxCoveredSqFt} sqft.
 4. Place exactly the "requested" count for each product if space allows; otherwise as many as fit.

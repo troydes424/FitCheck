@@ -285,6 +285,8 @@ export default function ParcelAnalyzer({ products = VOLUMOD_PRODUCTS, wizardStep
 
   // Multi-layout config
   const [multiQuantities, setMultiQuantities] = useState({});
+  const [multiSpacing,    setMultiSpacing]    = useState({}); // { id: { front, back, left, right } }
+  const [spacingOpenId,   setSpacingOpenId]   = useState(null);
   const [multiProducts,   setMultiProducts]   = useState([]);
 
   // AI / map settings
@@ -500,7 +502,8 @@ export default function ParcelAnalyzer({ products = VOLUMOD_PRODUCTS, wizardStep
       .filter((p) => selectedIds.has(p.id))
       .map((p) => {
         const requested = Math.max(1, Number(multiQuantities[p.id]) || 1);
-        return { ...p, count: requested, requestedCount: requested };
+        const spacing = multiSpacing[p.id] ?? { front: 10, back: 10, left: 10, right: 10 };
+        return { ...p, count: requested, requestedCount: requested, spacing };
       });
     if (prods.length === 1) {
       openDetail(prods[0]);
@@ -525,22 +528,25 @@ export default function ParcelAnalyzer({ products = VOLUMOD_PRODUCTS, wizardStep
       {/* ── Step 1: Parcel Search ─────────────────────────────────────────── */}
       {wizardStep === 1 && (
         <div className="wizard-step wizard-step-centered">
-          <h1 className="step1-title">Volumod Fit Engine</h1>
+          <img
+            src="https://static.wixstatic.com/media/9b04fd_ae70a7f5c08146979133b913a3fb7acd~mv2.png"
+            alt="Volumod"
+            className="step1-logo"
+          />
           <form className="parcel-form" onSubmit={handleLookup}>
             <div className="parcel-form-row">
               <div className="form-group grow">
-                <label htmlFor="pa-address">Parcel Address</label>
                 <input
                   id="pa-address"
                   type="text"
                   value={address}
                   onChange={(e) => setAddress(e.target.value)}
-                  placeholder="123 Main St, Indianapolis, IN"
+                  placeholder="Parcel Address...."
                   disabled={loading}
                 />
               </div>
               <button type="submit" className="lookup-btn" disabled={loading}>
-                {loading ? '…' : 'Analyze'}
+                {loading ? '…' : "Let's Visualize"}
               </button>
             </div>
 
@@ -722,6 +728,13 @@ export default function ParcelAnalyzer({ products = VOLUMOD_PRODUCTS, wizardStep
                     <strong>{p.name}</strong>
                     <span className="admin-type-tag">{p.type} · {p.footprintW}′×{p.footprintD}′</span>
                   </div>
+                  <button
+                    type="button"
+                    className="spacing-toggle"
+                    onClick={() => setSpacingOpenId((prev) => (prev === p.id ? null : p.id))}
+                  >
+                    {spacingOpenId === p.id ? '▲' : '▼'} Spacing
+                  </button>
                   <div className="multi-config-qty">
                     <label>Quantity</label>
                     <QtyInput
@@ -739,6 +752,29 @@ export default function ParcelAnalyzer({ products = VOLUMOD_PRODUCTS, wizardStep
                       }}
                     />
                   </div>
+                  {spacingOpenId === p.id && (
+                    <div className="spacing-panel">
+                      {['front', 'back', 'left', 'right'].map((side) => {
+                        const spacing = multiSpacing[p.id] ?? { front: 10, back: 10, left: 10, right: 10 };
+                        return (
+                          <div key={side} className="spacing-side">
+                            <label>{side.charAt(0).toUpperCase() + side.slice(1)} (ft)</label>
+                            <input
+                              type="number"
+                              min={0}
+                              value={spacing[side]}
+                              onChange={(e) =>
+                                setMultiSpacing((prev) => ({
+                                  ...prev,
+                                  [p.id]: { ...spacing, [side]: Number(e.target.value) },
+                                }))
+                              }
+                            />
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
