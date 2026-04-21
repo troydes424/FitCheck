@@ -47,7 +47,7 @@ function Trees({ ox, oy, pW, pH, sbFront, sbRear, sbSide, scale, count = 14 }) {
   );
 }
 
-function Building({ pl, color, scale, buildX, buildY, xPx, yPx, rotation, isDragging, isRotating, onMouseDown, onRotateStart, productName }) {
+function Building({ pl, color, scale, buildX, buildY, xPx, yPx, rotation, isDragging, isRotating, isViolating, onMouseDown, onRotateStart, productName }) {
   const sx = buildX + xPx;
   const sy = buildY + yPx;
   const sw = pl.widthFt * scale;
@@ -99,9 +99,24 @@ function Building({ pl, color, scale, buildX, buildY, xPx, yPx, rotation, isDrag
         <line x1={sx}    y1={sy+sh} x2={rx1} y2={ry2} stroke="rgba(0,0,0,0.25)" strokeWidth="0.8" />
         <line x1={sx+sw} y1={sy+sh} x2={rx2} y2={ry2} stroke="rgba(0,0,0,0.25)" strokeWidth="0.8" />
 
-        {/* Colour border */}
+        {/* Red violation overlay tint */}
+        {isViolating && (
+          <rect x={sx} y={sy} width={sw} height={sh}
+            fill="rgba(220,38,38,0.22)" rx="1" />
+        )}
+
+        {/* Colour border — red when violating spacing/overlap */}
         <rect x={sx} y={sy} width={sw} height={sh}
-          fill="none" stroke={color.stroke} strokeWidth={isActive ? 2.5 : 1.8} rx="1" />
+          fill="none"
+          stroke={isViolating ? '#dc2626' : color.stroke}
+          strokeWidth={isViolating ? 2.5 : isActive ? 2.5 : 1.8} rx="1" />
+
+        {/* Red warning ring when violating */}
+        {isViolating && (
+          <rect x={sx - 2} y={sy - 2} width={sw + 4} height={sh + 4}
+            fill="none" stroke="rgba(220,38,38,0.6)" strokeWidth="1.5"
+            strokeDasharray="4 3" rx="2" />
+        )}
 
         {/* Active ring */}
         {isActive && (
@@ -340,10 +355,6 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
         pt.x - buildX - d.offsetX, pt.y - buildY - d.offsetY,
         sw, sh, rot, buildW, buildH
       );
-      // Reject if new position violates spacing with any other building
-      const myBBox = rotatedBBox(nx + sw / 2, ny + sh / 2, sw, sh, rot);
-      const mySpacing = getSpacing(pl.productId);
-      if (otherBBoxes(d.idx).some((b) => bboxesConflict(myBBox, b, mySpacing, getSpacing(b.productId)))) return;
 
       setPosFt((prev) => {
         const next = [...prev];
@@ -362,11 +373,6 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
       const { xPx: nx, yPx: ny } = clampRotated(
         pos.xFt * scale, pos.yFt * scale, sw, sh, angle, buildW, buildH
       );
-
-      // Reject if new rotation violates spacing
-      const myBBox = rotatedBBox(nx + sw / 2, ny + sh / 2, sw, sh, angle);
-      const mySpacing = getSpacing(pl.productId);
-      if (otherBBoxes(d.idx).some((b) => bboxesConflict(myBBox, b, mySpacing, getSpacing(b.productId)))) return;
 
       setRotations((prev) => {
         const next = [...prev];
@@ -392,6 +398,28 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
   const covered     = placements.reduce((s, pl) => s + pl.widthFt * pl.depthFt, 0);
   const coveragePct = ((covered / parcel.sqft) * 100).toFixed(1);
   const totalUnits  = placements.reduce((s, p) => s + (productMap[p.productId]?.units ?? 1), 0);
+
+  // Determine which buildings violate spacing/overlap with any other building
+  const nonCompliant = new Set();
+  for (let i = 0; i < placements.length; i++) {
+    const pi = posFt[i] ?? { xFt: 0, yFt: 0 };
+    const swi = placements[i].widthFt * scale;
+    const shi = placements[i].depthFt * scale;
+    const bbi = rotatedBBox(pi.xFt * scale + swi / 2, pi.yFt * scale + shi / 2, swi, shi, rotations[i] ?? 0);
+    const si  = getSpacing(placements[i].productId);
+    for (let j = i + 1; j < placements.length; j++) {
+      const pj = posFt[j] ?? { xFt: 0, yFt: 0 };
+      const swj = placements[j].widthFt * scale;
+      const shj = placements[j].depthFt * scale;
+      const bbj = rotatedBBox(pj.xFt * scale + swj / 2, pj.yFt * scale + shj / 2, swj, shj, rotations[j] ?? 0);
+      const sj  = getSpacing(placements[j].productId);
+      if (bboxesConflict(bbi, bbj, si, sj)) {
+        nonCompliant.add(i);
+        nonCompliant.add(j);
+      }
+    }
+  }
+  const hasViolation = nonCompliant.size > 0;
 
   return (
     <div className="birds-eye-wrap">
@@ -453,6 +481,7 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
               rotation={rotations[i] ?? 0}
               isDragging={activeIdx === i && activeMode === 'drag'}
               isRotating={activeIdx === i && activeMode === 'rotate'}
+              isViolating={nonCompliant.has(i)}
               productName={productMap[pl.productId]?.name}
               onMouseDown={(e) => handleDragStart(e, i)}
               onRotateStart={(e) => handleRotateStart(e, i)} />
@@ -513,24 +542,6 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
           const bw = bb.w;
           const bh = bb.h;
 
-          // Corner: distance from each corner to nearest other building's nearest point
-          const cornerDist = (cornerX, cornerY) => {
-            if (others.length === 0) return null;
-            let min = Infinity;
-            for (const o of others) {
-              const dx = Math.max(o.x - cornerX, 0, cornerX - (o.x + o.w));
-              const dy = Math.max(o.y - cornerY, 0, cornerY - (o.y + o.h));
-              const d  = Math.sqrt(dx * dx + dy * dy);
-              if (d < min) min = d;
-            }
-            return Math.round(min / scale);
-          };
-
-          const cTL = cornerDist(bb.x,        bb.y);
-          const cTR = cornerDist(bb.x + bb.w, bb.y);
-          const cBL = cornerDist(bb.x,        bb.y + bb.h);
-          const cBR = cornerDist(bb.x + bb.w, bb.y + bb.h);
-
           const Pill = ({ x, y, text, accent }) => (
             <g>
               <rect x={x - 9} y={y - 5} width={18} height={10} rx="2"
@@ -554,8 +565,7 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
           const tickRightX  = buildX + obsRight;
 
           // Pill inset from each edge (pulled inside the building)
-          const SIDE_INSET   = 6;
-          const CORNER_INSET = 11;
+          const SIDE_INSET = 6;
 
           return (
             <g style={{ pointerEvents: 'none' }}>
@@ -578,17 +588,6 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
                 <>
                   <Pill x={bx + SIDE_INSET + 5}      y={by + bh / 2} text={`${gapLeft}'`}  accent />
                   <Pill x={bx + bw - SIDE_INSET - 5} y={by + bh / 2} text={`${gapRight}'`} accent />
-                </>
-              )}
-
-              {/* Corner pills only if the building is large enough that they
-                  won't run into the centred side pills */}
-              {bw >= 58 && bh >= 32 && (
-                <>
-                  {cTL !== null && <Pill x={bx + CORNER_INSET}      y={by + 6}        text={`${cTL}'`} />}
-                  {cTR !== null && <Pill x={bx + bw - CORNER_INSET} y={by + 6}        text={`${cTR}'`} />}
-                  {cBL !== null && <Pill x={bx + CORNER_INSET}      y={by + bh - 6}   text={`${cBL}'`} />}
-                  {cBR !== null && <Pill x={bx + bw - CORNER_INSET} y={by + bh - 6}   text={`${cBR}'`} />}
                 </>
               )}
             </g>
@@ -630,6 +629,16 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
           {parcel.depth} ft
         </text>
       </svg>
+
+      {hasViolation && (
+        <div className="birds-eye-warning">
+          <span className="bev-warn-icon">⚠</span>
+          <div>
+            <strong>Layout not compliant</strong>
+            <span>{nonCompliant.size} building{nonCompliant.size > 1 ? 's' : ''} violate the minimum spacing requirements set in Configure Layout.</span>
+          </div>
+        </div>
+      )}
 
       <div className="birds-eye-legend">
         {legendItems.map(({ id, color, name }) => (

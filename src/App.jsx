@@ -54,7 +54,6 @@ function buildOverviewEmail(parcel, results) {
 }
 
 function App() {
-  const [isCollapsed, setIsCollapsed] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [products, setProducts] = useState(DEFAULT_PRODUCTS);
   const [wizardStep, setWizardStep] = useState(1);
@@ -72,37 +71,7 @@ function App() {
   }
 
   return (
-    <div className={`app ${isCollapsed ? 'collapsed' : ''}`}>
-      <aside className="sidebar">
-        <div className="sidebar-header">
-          {!isCollapsed && (
-            <img
-              src="https://static.wixstatic.com/media/9b04fd_ae70a7f5c08146979133b913a3fb7acd~mv2.png"
-              alt="Volumod"
-              className="sidebar-logo"
-            />
-          )}
-          <button
-            className="collapse-btn"
-            onClick={() => setIsCollapsed(!isCollapsed)}
-            aria-label="Toggle sidebar"
-          >
-            {isCollapsed ? '›' : '‹'}
-          </button>
-        </div>
-
-        <nav className="nav">
-          <button
-            className={`nav-item ${!isAdmin ? 'active' : ''}`}
-            onClick={() => setIsAdmin(false)}
-            title={isCollapsed ? 'Mock up' : ''}
-          >
-            <span className="nav-icon">⊞</span>
-            {!isCollapsed && <span className="nav-label">Mock up</span>}
-          </button>
-        </nav>
-      </aside>
-
+    <div className="app">
       <main className="main-content">
         <div className="top-bar">
           {!isAdmin && <StepBar current={wizardStep} />}
@@ -114,7 +83,6 @@ function App() {
             ⚙
           </button>
         </div>
-
 
         {isAdmin ? (
           <div className="page page-wide">

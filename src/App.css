@@ -1503,6 +1503,39 @@ body {
   line-height: 1.5;
 }
 
+/* ===== Birds-eye violation warning ===== */
+.birds-eye-warning {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  background: rgba(220, 38, 38, 0.1);
+  border: 1px solid rgba(220, 38, 38, 0.4);
+  border-radius: 8px;
+  padding: 0.65rem 0.85rem;
+  color: #b91c1c;
+}
+
+.bev-warn-icon {
+  font-size: 1.25rem;
+  line-height: 1;
+}
+
+.birds-eye-warning > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.birds-eye-warning strong {
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+.birds-eye-warning span:last-child {
+  font-size: 0.75rem;
+  color: #991b1b;
+}
+
 /* ===== Layout error message ===== */
 .layout-error {
   font-size: 0.8rem;
