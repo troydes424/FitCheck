@@ -2,15 +2,36 @@ import { useState, useRef, useEffect } from 'react';
 
 const SVG_W = 720;
 const SVG_H = 420;
-const LABEL_PAD = 56;
+const LABEL_PAD = 48;
 
+const DEG = Math.PI / 180;
+const MIN_PITCH = 10;   // approaching horizon
+const MAX_PITCH = 90;   // true top-down
+const DEFAULT_YAW   = 45;
+const DEFAULT_PITCH = 35;
+
+// Floor-to-floor height for a story + foundation (feet)
+const STORY_HEIGHT_FT = 9.5;
+const FOUNDATION_FT = 1;
+// Gable pitch as a fraction of the building's shorter side (only pitched roofs)
+const ROOF_PITCH_RATIO = 0.22;
+const TREE_HEIGHT_FT = 10;
+
+// Neutral "vinyl siding" palette — keeps attention on roofs for product identification
+const WALLS = {
+  light: '#eee5d0',
+  mid:   '#d6cab0',
+  dark:  '#a79a7c',
+};
+
+// Per-product identifying colors — used mainly on the roof
 const COLORS = [
-  { fill: 'rgba(29,44,243,0.5)',   stroke: '#1d2cf3', text: '#1e40af', roof: '#c7d2fe' },
-  { fill: 'rgba(52,211,153,0.5)',  stroke: '#34d399', text: '#10b981', roof: '#bbf7d0' },
-  { fill: 'rgba(251,191,36,0.5)',  stroke: '#fbbf24', text: '#d97706', roof: '#fef08a' },
-  { fill: 'rgba(248,113,113,0.5)', stroke: '#f87171', text: '#ef4444', roof: '#fecaca' },
-  { fill: 'rgba(167,139,250,0.5)', stroke: '#a78bfa', text: '#8b5cf6', roof: '#e9d5ff' },
-  { fill: 'rgba(251,146,60,0.5)',  stroke: '#fb923c', text: '#ea580c', roof: '#fed7aa' },
+  { roof: '#3730a3', stroke: '#1e1b4b', accent: '#4f46e5' },
+  { roof: '#065f46', stroke: '#064e3b', accent: '#059669' },
+  { roof: '#9a6212', stroke: '#713f12', accent: '#d97706' },
+  { roof: '#991b1b', stroke: '#7f1d1d', accent: '#dc2626' },
+  { roof: '#5b21b6', stroke: '#3b0764', accent: '#7c3aed' },
+  { roof: '#9a3412', stroke: '#7c2d12', accent: '#ea580c' },
 ];
 
 function seededRng(seed) {
@@ -18,185 +39,339 @@ function seededRng(seed) {
   return () => { s = (s * 1664525 + 1013904223) & 0xffffffff; return (s >>> 0) / 0xffffffff; };
 }
 
-function Trees({ ox, oy, pW, pH, sbFront, sbRear, sbSide, scale, count = 14 }) {
-  const rng = seededRng(42);
-  const trees = [];
-  const margin = 6;
-  for (let i = 0; i < count * 4 && trees.length < count; i++) {
-    const r = rng();
-    const zone = Math.floor(r * 4);
-    let x, y;
-    if (zone === 0) { x = ox + rng() * pW; y = oy + rng() * sbRear; }
-    else if (zone === 1) { x = ox + rng() * pW; y = oy + pH - rng() * sbFront; }
-    else if (zone === 2) { x = ox + rng() * sbSide; y = oy + sbRear + rng() * (pH - sbFront - sbRear); }
-    else { x = ox + pW - rng() * sbSide; y = oy + sbRear + rng() * (pH - sbFront - sbRear); }
-    if (x > ox + margin && x < ox + pW - margin && y > oy + margin && y < oy + pH - margin) {
-      trees.push({ x, y, r: 4 + rng() * 4 });
-    }
-  }
+// Generalized orthographic projection with yaw (θ) around z-axis, pitch (φ) tilt from horizon
+// v holds { cosA, sinA, cosP, sinP, ox, oy }
+function proj(px, py, pz, v) {
+  const xr = px * v.cosA - py * v.sinA;
+  const yr = px * v.sinA + py * v.cosA;
+  return {
+    x: v.ox + xr,
+    y: v.oy + yr * v.sinP - pz * v.cosP,
+  };
+}
+
+// Inverse of proj for z=0 (ground-plane picking)
+function invProj(sx, sy, v) {
+  const xr = sx - v.ox;
+  const yr = (sy - v.oy) / Math.max(v.sinP, 0.02);
+  return {
+    x:  xr * v.cosA + yr * v.sinA,
+    y: -xr * v.sinA + yr * v.cosA,
+  };
+}
+
+// Depth-from-camera for sorting (higher = closer to viewer)
+function depthOf(px, py, v) {
+  return px * v.sinA + py * v.cosA;
+}
+
+function rotatePt(x, y, cx, cy, angleDeg) {
+  const r = angleDeg * DEG;
+  const c = Math.cos(r), s = Math.sin(r);
+  const dx = x - cx, dy = y - cy;
+  return { x: cx + dx * c - dy * s, y: cy + dx * s + dy * c };
+}
+
+function rotatedBBox(cx, cy, sw, sh, angleDeg) {
+  const rad = angleDeg * DEG;
+  const c = Math.abs(Math.cos(rad)), s = Math.abs(Math.sin(rad));
+  return { x: cx - (sw * c + sh * s) / 2, y: cy - (sw * s + sh * c) / 2,
+           w:  sw * c + sh * s,           h:  sw * s + sh * c };
+}
+
+function footprintCorners(xPx, yPx, w, h, angleDeg) {
+  const cx = xPx + w / 2, cy = yPx + h / 2;
+  return [
+    rotatePt(xPx,     yPx,     cx, cy, angleDeg),
+    rotatePt(xPx + w, yPx,     cx, cy, angleDeg),
+    rotatePt(xPx + w, yPx + h, cx, cy, angleDeg),
+    rotatePt(xPx,     yPx + h, cx, cy, angleDeg),
+  ];
+}
+
+function pts(arr) {
+  return arr.map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ');
+}
+
+function Tree({ xPx, yPx, r, v, scale }) {
+  const treeHPx = TREE_HEIGHT_FT * scale;
+  const base = proj(xPx, yPx, 0, v);
+  const top  = proj(xPx, yPx, treeHPx, v);
+  const shPt = proj(xPx + 3, yPx + 3, 0, v);
   return (
     <g>
-      {trees.map((t, i) => (
-        <g key={i}>
-          <circle cx={t.x + 1.5} cy={t.y + 1.5} r={t.r} fill="rgba(0,0,0,0.18)" />
-          <circle cx={t.x} cy={t.y} r={t.r} fill="#2d6a4f" />
-          <circle cx={t.x - t.r * 0.25} cy={t.y - t.r * 0.25} r={t.r * 0.55} fill="#40916c" />
-        </g>
-      ))}
+      <ellipse cx={shPt.x} cy={shPt.y} rx={r * 1.2} ry={r * 0.55} fill="rgba(0,0,0,0.22)" />
+      <line x1={base.x} y1={base.y} x2={top.x} y2={top.y}
+        stroke="#5a3a22" strokeWidth="1.3" strokeLinecap="round" />
+      <circle cx={top.x} cy={top.y} r={r} fill="#2d6a4f" />
+      <circle cx={top.x - r * 0.25} cy={top.y - r * 0.25} r={r * 0.55} fill="#52b788" />
     </g>
   );
 }
 
-function Building({ pl, color, scale, buildX, buildY, xPx, yPx, rotation, isDragging, isRotating, isViolating, onMouseDown, onRotateStart, productName }) {
-  const sx = buildX + xPx;
-  const sy = buildY + yPx;
-  const sw = pl.widthFt * scale;
-  const sh = pl.depthFt * scale;
-  const cx = sx + sw / 2;
-  const cy = sy + sh / 2;
+function Building({ pl, stories, units, color, scale, xPx, yPx, rotation, v, isDragging, isRotating, isViolating, onMouseDown, onRotateStart, productName }) {
+  const bw = pl.widthFt * scale;
+  const bh = pl.depthFt * scale;
+  const eaveFt   = stories * STORY_HEIGHT_FT + FOUNDATION_FT;
+  const eavePx   = eaveFt * scale;
+  const usePitched = stories <= 2;
+  const ridgeExtraFt = usePitched ? Math.min(pl.widthFt, pl.depthFt) * ROOF_PITCH_RATIO : 0;
+  const ridgePx  = eavePx + ridgeExtraFt * scale;
 
-  const eave = Math.min(sw, sh) * 0.22;
-  const rx1 = sx + eave, rx2 = sx + sw - eave;
-  const ry1 = sy + eave, ry2 = sy + sh - eave;
-  const seamCount = Math.max(1, Math.floor((rx2 - rx1) / 9));
-  const seamStep  = (rx2 - rx1) / (seamCount + 1);
+  const cornersBot  = footprintCorners(xPx, yPx, bw, bh, rotation);
+  const screenBot   = cornersBot.map(p => proj(p.x, p.y, 0,      v));
+  const screenEave  = cornersBot.map(p => proj(p.x, p.y, eavePx, v));
 
-  const isActive = isDragging || isRotating;
+  const cx = xPx + bw / 2, cy = yPx + bh / 2;
+
+  // Ridge endpoints in plan (if pitched) — at midpoints of the short-side walls
+  const ridgeAlongX = pl.widthFt >= pl.depthFt;
+  const ridgeLocalA = ridgeAlongX ? { x: xPx,      y: yPx + bh / 2 } : { x: xPx + bw / 2, y: yPx      };
+  const ridgeLocalB = ridgeAlongX ? { x: xPx + bw, y: yPx + bh / 2 } : { x: xPx + bw / 2, y: yPx + bh };
+  const ridgePlanA  = rotatePt(ridgeLocalA.x, ridgeLocalA.y, cx, cy, rotation);
+  const ridgePlanB  = rotatePt(ridgeLocalB.x, ridgeLocalB.y, cx, cy, rotation);
+  const ridgeScreenA = proj(ridgePlanA.x, ridgePlanA.y, ridgePx, v);
+  const ridgeScreenB = proj(ridgePlanB.x, ridgePlanB.y, ridgePx, v);
+
+  const centerTop = proj(cx, cy, usePitched ? ridgePx : eavePx, v);
+  const handleY   = centerTop.y - 20;
+  const isActive  = isDragging || isRotating;
+
+  // Ground shadow — proportional to eave height and current pitch (nearly disappears top-down)
+  const shadowOff = Math.max(2, eavePx * 0.10);
+  const shadowCorners = cornersBot.map(p => proj(p.x + shadowOff, p.y + shadowOff, 0, v));
+
+  function wallPoint(ci, cj, frac, z) {
+    return proj(ci.x + (cj.x - ci.x) * frac, ci.y + (cj.y - ci.y) * frac, z, v);
+  }
+  function wallRect(ci, cj, f1, f2, z1, z2) {
+    return [wallPoint(ci, cj, f1, z1), wallPoint(ci, cj, f2, z1),
+            wallPoint(ci, cj, f2, z2), wallPoint(ci, cj, f1, z2)];
+  }
+
+  // Build 4 walls with gable pentagon where applicable (pre-rotation indices: 0=N, 1=E, 2=S-front, 3=W)
+  const walls = [];
+  for (let i = 0; i < 4; i++) {
+    const j = (i + 1) % 4;
+    const ci = cornersBot[i];
+    const cj = cornersBot[j];
+    const midDepth = depthOf((ci.x + cj.x) / 2, (ci.y + cj.y) / 2, v);
+    const wallWidthFt = Math.hypot(cj.x - ci.x, cj.y - ci.y) / scale;
+    const isFront = i === 2;
+    const isGable = usePitched && (ridgeAlongX ? (i === 1 || i === 3) : (i === 0 || i === 2));
+    const ridgeApex = isGable
+      ? ((ridgeAlongX ? (i === 3) : (i === 0)) ? ridgeScreenA : ridgeScreenB)
+      : null;
+    const polyBase = isGable
+      ? [screenBot[i], screenBot[j], screenEave[j], ridgeApex, screenEave[i]]
+      : [screenBot[i], screenBot[j], screenEave[j], screenEave[i]];
+    walls.push({ i, j, ci, cj, midDepth, wallWidthFt, isFront, isGable, polyBase });
+  }
+  walls.sort((a, b) => a.midDepth - b.midDepth);
+  const wallFills = [WALLS.dark, WALLS.dark, WALLS.mid, WALLS.light];
+
+  // Roof pieces
+  const roofPieces = [];
+  const midOf = (...pts) => {
+    const sx = pts.reduce((s, p) => s + p.x, 0) / pts.length;
+    const sy = pts.reduce((s, p) => s + p.y, 0) / pts.length;
+    return depthOf(sx, sy, v);
+  };
+  if (usePitched) {
+    if (ridgeAlongX) {
+      roofPieces.push({ poly: [screenEave[0], screenEave[1], ridgeScreenB, ridgeScreenA],
+        depth: midOf(cornersBot[0], cornersBot[1], ridgePlanA, ridgePlanB), shade: 'dark'  });
+      roofPieces.push({ poly: [screenEave[3], screenEave[2], ridgeScreenB, ridgeScreenA],
+        depth: midOf(cornersBot[3], cornersBot[2], ridgePlanA, ridgePlanB), shade: 'light' });
+    } else {
+      roofPieces.push({ poly: [screenEave[0], screenEave[3], ridgeScreenB, ridgeScreenA],
+        depth: midOf(cornersBot[0], cornersBot[3], ridgePlanA, ridgePlanB), shade: 'dark'  });
+      roofPieces.push({ poly: [screenEave[1], screenEave[2], ridgeScreenB, ridgeScreenA],
+        depth: midOf(cornersBot[1], cornersBot[2], ridgePlanA, ridgePlanB), shade: 'light' });
+    }
+  } else {
+    roofPieces.push({ poly: screenEave, depth: Number.POSITIVE_INFINITY, shade: 'flat' });
+  }
+  roofPieces.sort((a, b) => a.depth - b.depth);
+
+  function decorateWall(wall, fillIdx, key) {
+    const { ci, cj, wallWidthFt, isFront, polyBase } = wall;
+    const nodes = [];
+    const wallFill = isViolating ? 'rgba(220,38,38,0.6)' : wallFills[fillIdx];
+
+    nodes.push(
+      <polygon key={`${key}-p`} points={pts(polyBase)}
+        fill={wallFill} stroke="rgba(40,30,20,0.45)" strokeWidth="0.7" strokeLinejoin="miter" />
+    );
+
+    if (wallWidthFt > 12) {
+      for (let s = 1; s < stories; s++) {
+        const z = s * (eavePx / stories);
+        const l1 = wallPoint(ci, cj, 0, z);
+        const l2 = wallPoint(ci, cj, 1, z);
+        nodes.push(
+          <line key={`${key}-s${s}`} x1={l1.x} y1={l1.y} x2={l2.x} y2={l2.y}
+            stroke="rgba(40,30,20,0.22)" strokeWidth="0.7" />
+        );
+      }
+    }
+
+    if (wallWidthFt > 10) {
+      const cols = Math.max(2, Math.min(8, Math.floor(wallWidthFt / 9)));
+      const winWFt = 2.4, winHFt = 3.8;
+      const halfWFrac = (winWFt / 2) / wallWidthFt;
+      const storyHPx  = eavePx / stories;
+      for (let row = 0; row < stories; row++) {
+        const zCenter = row * storyHPx + storyHPx * 0.58;
+        const zBot = zCenter - (winHFt / 2) * scale;
+        const zTop = zCenter + (winHFt / 2) * scale;
+        if (zBot < 0.4 * scale) continue;
+        for (let c = 0; c < cols; c++) {
+          const fracCenter = (c + 0.5) / cols;
+          if (isFront && row === 0) {
+            const doorCount = Math.min(Math.max(1, units), 4);
+            let clashesDoor = false;
+            for (let d = 0; d < doorCount; d++) {
+              const doorCenter = (d + 0.5) / doorCount;
+              if (Math.abs(doorCenter - fracCenter) < (1.6 / wallWidthFt + halfWFrac)) {
+                clashesDoor = true; break;
+              }
+            }
+            if (clashesDoor) continue;
+          }
+          const poly = wallRect(ci, cj, fracCenter - halfWFrac, fracCenter + halfWFrac, zBot, zTop);
+          nodes.push(
+            <polygon key={`${key}-w${row}-${c}`} points={pts(poly)}
+              fill="#bfd8ec" stroke="rgba(40,30,20,0.5)" strokeWidth="0.45" />
+          );
+          const mp1 = wallPoint(ci, cj, fracCenter, zBot);
+          const mp2 = wallPoint(ci, cj, fracCenter, zTop);
+          nodes.push(
+            <line key={`${key}-m${row}-${c}`} x1={mp1.x} y1={mp1.y} x2={mp2.x} y2={mp2.y}
+              stroke="rgba(40,30,20,0.4)" strokeWidth="0.35" />
+          );
+        }
+      }
+    }
+
+    if (isFront && wallWidthFt > 12) {
+      const doorCount = Math.min(Math.max(1, units), 4);
+      const doorWFt = 3, doorHFt = 7;
+      const halfWFrac = (doorWFt / 2) / wallWidthFt;
+      for (let d = 0; d < doorCount; d++) {
+        const fracCenter = (d + 0.5) / doorCount;
+        const poly = wallRect(ci, cj, fracCenter - halfWFrac, fracCenter + halfWFrac, 0, doorHFt * scale);
+        nodes.push(
+          <polygon key={`${key}-d${d}`} points={pts(poly)}
+            fill="#3a2817" stroke="rgba(20,10,0,0.6)" strokeWidth="0.5" />
+        );
+        const knob = wallPoint(ci, cj, fracCenter + halfWFrac * 0.55, doorHFt * scale * 0.5);
+        nodes.push(<circle key={`${key}-k${d}`} cx={knob.x} cy={knob.y} r="0.55" fill="#d4af37" />);
+      }
+    }
+
+    return nodes;
+  }
+
+  const roofStroke = isViolating ? '#dc2626' : color.stroke;
 
   return (
-    <g transform={`rotate(${rotation}, ${cx}, ${cy})`}>
-      {/* Building body — drag handle */}
-      <g onMouseDown={onMouseDown} style={{ cursor: isDragging ? 'grabbing' : 'grab', userSelect: 'none' }}>
-        {/* Drop shadow */}
-        <rect x={sx + 5} y={sy + 5} width={sw} height={sh} fill="rgba(0,0,0,0.35)" rx="1" />
+    <g>
+      <polygon points={pts(shadowCorners)} fill="rgba(0,0,0,0.3)" />
 
-        {/* North slope */}
-        <polygon points={`${sx},${sy} ${sx+sw},${sy} ${rx2},${ry1} ${rx1},${ry1}`} fill="#9ab0b8" />
-        {/* South slope */}
-        <polygon points={`${sx},${sy+sh} ${sx+sw},${sy+sh} ${rx2},${ry2} ${rx1},${ry2}`} fill="#4e6470" />
-        {/* West slope */}
-        <polygon points={`${sx},${sy} ${sx},${sy+sh} ${rx1},${ry2} ${rx1},${ry1}`} fill="#6a8088" />
-        {/* East slope */}
-        <polygon points={`${sx+sw},${sy} ${sx+sw},${sy+sh} ${rx2},${ry2} ${rx2},${ry1}`} fill="#6a8088" />
-
-        {/* Flat ridge top */}
-        <rect x={rx1} y={ry1} width={rx2-rx1} height={ry2-ry1} fill="#7d9aa3" />
-
-        {/* Standing seams */}
-        {Array.from({ length: seamCount }).map((_, i) => (
-          <line key={i}
-            x1={rx1 + seamStep * (i+1)} y1={ry1}
-            x2={rx1 + seamStep * (i+1)} y2={ry2}
-            stroke="rgba(0,0,0,0.18)" strokeWidth="0.7" />
+      <g onPointerDown={onMouseDown}
+        style={{ cursor: isDragging ? 'grabbing' : 'grab', userSelect: 'none', touchAction: 'none' }}>
+        {walls.map((wall, idx) => (
+          <g key={`wall-${wall.i}`}>
+            {decorateWall(wall, idx, `wall-${wall.i}`)}
+          </g>
         ))}
 
-        {/* Ridge highlight */}
-        <line x1={rx1} y1={ry1} x2={rx2} y2={ry1} stroke="rgba(255,255,255,0.4)" strokeWidth="1" />
-
-        {/* Hip corner lines */}
-        <line x1={sx}    y1={sy}    x2={rx1} y2={ry1} stroke="rgba(0,0,0,0.25)" strokeWidth="0.8" />
-        <line x1={sx+sw} y1={sy}    x2={rx2} y2={ry1} stroke="rgba(0,0,0,0.25)" strokeWidth="0.8" />
-        <line x1={sx}    y1={sy+sh} x2={rx1} y2={ry2} stroke="rgba(0,0,0,0.25)" strokeWidth="0.8" />
-        <line x1={sx+sw} y1={sy+sh} x2={rx2} y2={ry2} stroke="rgba(0,0,0,0.25)" strokeWidth="0.8" />
-
-        {/* Red violation overlay tint */}
-        {isViolating && (
-          <rect x={sx} y={sy} width={sw} height={sh}
-            fill="rgba(220,38,38,0.22)" rx="1" />
+        {roofPieces.map((piece, i) => {
+          const base = isViolating ? 'rgba(220,38,38,0.75)' : color.roof;
+          const fill = piece.shade === 'light' ? base
+                     : piece.shade === 'dark'  ? color.stroke
+                     : base;
+          return (
+            <polygon key={`rp-${i}`} points={pts(piece.poly)}
+              fill={fill} stroke={roofStroke}
+              strokeWidth={isActive ? 2 : 1.2} strokeLinejoin="miter" />
+          );
+        })}
+        {usePitched && (
+          <line x1={ridgeScreenA.x} y1={ridgeScreenA.y} x2={ridgeScreenB.x} y2={ridgeScreenB.y}
+            stroke={roofStroke} strokeWidth={isActive ? 2 : 1.3} strokeLinecap="round" />
         )}
 
-        {/* Colour border — red when violating spacing/overlap */}
-        <rect x={sx} y={sy} width={sw} height={sh}
-          fill="none"
-          stroke={isViolating ? '#dc2626' : color.stroke}
-          strokeWidth={isViolating ? 2.5 : isActive ? 2.5 : 1.8} rx="1" />
-
-        {/* Red warning ring when violating */}
-        {isViolating && (
-          <rect x={sx - 2} y={sy - 2} width={sw + 4} height={sh + 4}
-            fill="none" stroke="rgba(220,38,38,0.6)" strokeWidth="1.5"
-            strokeDasharray="4 3" rx="2" />
+        {!usePitched && bw > 40 && bh > 30 && (
+          (() => {
+            const hvW = bw * 0.25, hvD = bh * 0.18;
+            const hvCX = xPx + bw * 0.72, hvCY = yPx + bh * 0.28;
+            const hvCorners = footprintCorners(hvCX - hvW/2, hvCY - hvD/2, hvW, hvD, rotation);
+            const hvTop = hvCorners.map(p => proj(p.x, p.y, eavePx + 1.5 * scale, v));
+            return (
+              <polygon points={pts(hvTop)} fill={color.accent} opacity="0.5"
+                stroke="rgba(0,0,0,0.4)" strokeWidth="0.5" />
+            );
+          })()
         )}
 
-        {/* Active ring */}
         {isActive && (
-          <rect x={sx-3} y={sy-3} width={sw+6} height={sh+6}
-            fill="none" stroke="rgba(255,255,255,0.7)" strokeWidth="1.5" strokeDasharray="5 3" rx="2" />
+          <polygon points={pts(screenBot)} fill="none"
+            stroke="rgba(255,255,255,0.85)" strokeWidth="1.5" strokeDasharray="5 3" />
+        )}
+        {isViolating && (
+          <polygon points={pts(screenBot)} fill="none"
+            stroke="#dc2626" strokeWidth="1.8" strokeDasharray="4 3" />
         )}
 
-        {/* HVAC */}
-        {sw > 44 && sh > 28 && (
-          <rect x={rx1+(rx2-rx1)*0.6} y={ry1+(ry2-ry1)*0.15}
-            width={Math.min(10,sw*0.12)} height={Math.min(7,sh*0.12)}
-            fill="#3a4a50" stroke="rgba(0,0,0,0.4)" strokeWidth="0.5" rx="1" />
-        )}
-
-        {/* Label — small name on top, smaller size below */}
-        {sw > 40 && sh > 22 && productName ? (
+        {bw > 40 && bh > 22 && productName ? (
           <g style={{ pointerEvents: 'none' }}>
-            <text x={cx} y={cy - 1} textAnchor="middle"
-              fill="#ffffff" fontSize="6" fontWeight="700"
+            <text x={centerTop.x} y={centerTop.y + 3} textAnchor="middle"
+              fill="#ffffff" fontSize="7.5" fontWeight="700"
               style={{ textShadow: '0 0 3px rgba(0,0,0,0.95)' }}>
               {productName}
             </text>
-            <text x={cx} y={cy + 6} textAnchor="middle"
-              fill="#ffffff" fontSize="5" fontWeight="500"
+            <text x={centerTop.x} y={centerTop.y + 11} textAnchor="middle"
+              fill="#ffffff" fontSize="5.5" fontWeight="500"
               style={{ textShadow: '0 0 3px rgba(0,0,0,0.95)' }}>
-              {pl.widthFt}′×{pl.depthFt}′
+              {pl.widthFt}′×{pl.depthFt}′ · {stories}-story
             </text>
           </g>
-        ) : sw > 24 && sh > 14 ? (
-          <text x={cx} y={cy + 2} textAnchor="middle"
-            fill="#ffffff" fontSize="6" fontWeight="600"
+        ) : bw > 24 && bh > 14 ? (
+          <text x={centerTop.x} y={centerTop.y + 3} textAnchor="middle"
+            fill="#ffffff" fontSize="6.5" fontWeight="600"
             style={{ textShadow: '0 0 3px rgba(0,0,0,0.95)', pointerEvents: 'none' }}>
             {pl.widthFt}′×{pl.depthFt}′
           </text>
         ) : null}
       </g>
 
-      {/* Rotate handle — modern circular grip */}
-      <g onMouseDown={onRotateStart} style={{ cursor: 'grab', userSelect: 'none' }}>
-        {/* Connector */}
-        <line x1={cx} y1={sy} x2={cx} y2={sy - 22}
+      <g onPointerDown={onRotateStart}
+        style={{ cursor: 'grab', userSelect: 'none', touchAction: 'none' }}>
+        {/* Invisible larger hit area for touch */}
+        <circle cx={centerTop.x} cy={handleY} r="18" fill="transparent" />
+        <line x1={centerTop.x} y1={centerTop.y} x2={centerTop.x} y2={handleY}
           stroke={isRotating ? '#1d2cf3' : 'rgba(15,23,42,0.45)'}
-          strokeWidth="1.4"
-          strokeLinecap="round"
+          strokeWidth="1.4" strokeLinecap="round"
           strokeDasharray={isRotating ? 'none' : '2 3'} />
-
-        {/* Soft outer halo */}
-        <circle cx={cx} cy={sy - 22} r={isRotating ? 11 : 9}
+        <circle cx={centerTop.x} cy={handleY} r={isRotating ? 11 : 9}
           fill={isRotating ? 'rgba(29,44,243,0.18)' : 'rgba(15,23,42,0.08)'} />
-
-        {/* Main handle */}
-        <circle cx={cx} cy={sy - 22} r="7.5"
+        <circle cx={centerTop.x} cy={handleY} r="7.5"
           fill={isRotating ? '#1d2cf3' : '#ffffff'}
-          stroke={isRotating ? '#1d2cf3' : '#374151'}
-          strokeWidth="1.5" />
-
-        {/* Curved rotation arrow */}
-        <g transform={`translate(${cx}, ${sy - 22})`} style={{ pointerEvents: 'none' }}>
-          <path
-            d="M -3.2 -0.5 A 3.2 3.2 0 1 1 0.8 3.1"
-            fill="none"
-            stroke={isRotating ? '#ffffff' : '#374151'}
-            strokeWidth="1.3"
-            strokeLinecap="round"
-          />
-          <polygon
-            points="0.8,3.1 -0.6,3.7 1.4,4.6"
-            fill={isRotating ? '#ffffff' : '#374151'}
-          />
+          stroke={isRotating ? '#1d2cf3' : '#374151'} strokeWidth="1.5" />
+        <g transform={`translate(${centerTop.x}, ${handleY})`} style={{ pointerEvents: 'none' }}>
+          <path d="M -3.2 -0.5 A 3.2 3.2 0 1 1 0.8 3.1" fill="none"
+            stroke={isRotating ? '#ffffff' : '#374151'} strokeWidth="1.3" strokeLinecap="round" />
+          <polygon points="0.8,3.1 -0.6,3.7 1.4,4.6"
+            fill={isRotating ? '#ffffff' : '#374151'} />
         </g>
       </g>
 
-      {/* Rotation angle badge — pill-style, brand blue */}
       {isRotating && (
         <g style={{ pointerEvents: 'none' }}>
-          <rect x={cx - 22} y={sy - 50} width={44} height={20} rx="10"
-            fill="#1d2cf3" />
-          <rect x={cx - 22} y={sy - 50} width={44} height={20} rx="10"
-            fill="none" stroke="rgba(255,255,255,0.3)" strokeWidth="1" />
-          <text x={cx} y={sy - 36} textAnchor="middle"
+          <rect x={centerTop.x - 22} y={handleY - 28} width="44" height="20" rx="10" fill="#1d2cf3" />
+          <text x={centerTop.x} y={handleY - 14} textAnchor="middle"
             fill="#ffffff" fontSize="10" fontWeight="700" letterSpacing="0.5">
             {Math.round(((rotation % 360) + 360) % 360)}°
           </text>
@@ -214,62 +389,67 @@ function getSvgPoint(e, svgEl) {
   };
 }
 
-// Clamp top-left pixel offset so the rotated AABB stays within the buildable area
-function clampRotated(xPx, yPx, sw, sh, angleDeg, areaW, areaH) {
-  const rad = angleDeg * Math.PI / 180;
-  const c = Math.abs(Math.cos(rad)), s = Math.abs(Math.sin(rad));
-  const hw = (sw * c + sh * s) / 2; // half AABB width
-  const hh = (sw * s + sh * c) / 2; // half AABB height
-  return {
-    xPx: Math.max(hw - sw / 2, Math.min(areaW - sw / 2 - hw, xPx)),
-    yPx: Math.max(hh - sh / 2, Math.min(areaH - sh / 2 - hh, yPx)),
-  };
-}
-
-// Axis-aligned bounding box of a rotated rectangle, centred on (cx, cy)
-function rotatedBBox(cx, cy, sw, sh, angleDeg) {
-  const rad = angleDeg * Math.PI / 180;
-  const c = Math.abs(Math.cos(rad)), s = Math.abs(Math.sin(rad));
-  const bw = sw * c + sh * s;
-  const bh = sw * s + sh * c;
-  return { x: cx - bw / 2, y: cy - bh / 2, w: bw, h: bh };
-}
-
-function bboxesOverlap(a, b) {
-  return !(a.x + a.w <= b.x || b.x + b.w <= a.x || a.y + a.h <= b.y || b.y + b.h <= a.y);
-}
-
-
 export default function BirdsEyeSVG({ parcel, setbacks, placements = [], products = [], isLoading, aiNotes, aiSource }) {
+  const productMap = Object.fromEntries(products.map((p) => [p.id, p]));
+
+  // ─── View mode + camera (yaw + pitch) ────────────────────────────
+  const [viewMode, setViewMode] = useState('3d'); // '3d' | '2d'
+  const [yaw,   setYaw]   = useState(DEFAULT_YAW);
+  const [pitch, setPitch] = useState(DEFAULT_PITCH);
+
+  // In 2D mode, force a straight-down plan view (north-up)
+  const effectiveYaw   = viewMode === '2d' ? 0  : yaw;
+  const effectivePitch = viewMode === '2d' ? 90 : pitch;
+
+  const cosA = Math.cos(effectiveYaw   * DEG);
+  const sinA = Math.sin(effectiveYaw   * DEG);
+  const cosP = Math.cos(effectivePitch * DEG);
+  const sinP = Math.sin(effectivePitch * DEG);
+
+  // Reserve vertical space for the tallest building
+  const maxStories = placements.reduce((m, pl) => Math.max(m, productMap[pl.productId]?.stories ?? 1), 1);
+  const reservedHeightFt = maxStories * STORY_HEIGHT_FT + FOUNDATION_FT + 6;
+
+  // Fit scale using worst-case rotated bounding box (diagonal) so the scene stays stable as yaw changes
   const availW = SVG_W - LABEL_PAD * 2;
   const availH = SVG_H - LABEL_PAD * 2;
-  const scale  = Math.min(availW / parcel.frontage, availH / parcel.depth);
+  const diagFt = Math.sqrt(parcel.frontage ** 2 + parcel.depth ** 2);
+  const scaleW = availW / diagFt;
+  const scaleH = availH / (diagFt * sinP + reservedHeightFt * cosP);
+  const scale  = Math.min(scaleW, scaleH);
 
   const pW = parcel.frontage * scale;
-  const pH = parcel.depth * scale;
-  const ox = (SVG_W - pW) / 2;
-  const oy = LABEL_PAD;
+  const pH = parcel.depth    * scale;
+  const reservedHeightPx = reservedHeightFt * scale;
+
+  // Centre the parcel's rotated-bbox in the viewBox, leaving room for building extrusion above
+  const parcelCornersPlan = [[0, 0], [pW, 0], [pW, pH], [0, pH]];
+  const yrVals = parcelCornersPlan.map(([x, y]) => x * sinA + y * cosA);
+  const xrVals = parcelCornersPlan.map(([x, y]) => x * cosA - y * sinA);
+  const xrMin = Math.min(...xrVals), xrMax = Math.max(...xrVals);
+  const yrMin = Math.min(...yrVals), yrMax = Math.max(...yrVals);
+  const sceneOx = SVG_W / 2 - (xrMin + xrMax) / 2;
+  const sceneOy = SVG_H / 2 + reservedHeightPx * cosP / 2 - (yrMin + yrMax) / 2 * sinP;
+
+  const v = { cosA, sinA, cosP, sinP, ox: sceneOx, oy: sceneOy };
 
   const sbFront = setbacks.front * scale;
   const sbRear  = setbacks.rear  * scale;
   const sbSide  = setbacks.side  * scale;
 
-  const buildX = ox + sbSide;
-  const buildY = oy + sbRear;
+  const buildX = sbSide;
+  const buildY = sbRear;
   const buildW = pW - sbSide * 2;
   const buildH = pH - sbFront - sbRear;
-  const midX   = SVG_W / 2;
 
-  const productMap  = Object.fromEntries(products.map((p) => [p.id, p]));
   const uniqueIds   = [...new Set(placements.map((p) => p.productId))];
   const colorMap    = Object.fromEntries(uniqueIds.map((id, i) => [id, COLORS[i % COLORS.length]]));
   const legendItems = uniqueIds.map((id) => ({ id, color: colorMap[id], name: productMap[id]?.name ?? id }));
 
-  // ── Position + rotation state ────────────────────────────────────
   const [posFt,     setPosFt]     = useState(() => placements.map((pl) => ({ xFt: pl.xFt ?? 0, yFt: pl.yFt ?? 0 })));
   const [rotations, setRotations] = useState(() => placements.map(() => 0));
   const [activeIdx, setActiveIdx] = useState(null);
-  const [activeMode, setActiveMode] = useState(null); // 'drag' | 'rotate'
+  const [activeMode, setActiveMode] = useState(null);
 
   const dragRef = useRef(null);
   const svgRef  = useRef(null);
@@ -279,14 +459,21 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
     setRotations(placements.map(() => 0));
   }, [placements]);
 
+  function capturePointer(e) {
+    try { svgRef.current?.setPointerCapture?.(e.pointerId); } catch { /* ignore */ }
+  }
+
   function handleDragStart(e, idx) {
     e.preventDefault();
-    const pt  = getSvgPoint(e, svgRef.current);
-    const pos = posFt[idx];
+    e.stopPropagation();
+    capturePointer(e);
+    const pt   = getSvgPoint(e, svgRef.current);
+    const plan = invProj(pt.x, pt.y, v);
+    const pos  = posFt[idx];
     dragRef.current = {
       mode: 'drag', idx,
-      offsetX: pt.x - (buildX + pos.xFt * scale),
-      offsetY: pt.y - (buildY + pos.yFt * scale),
+      offsetX: plan.x - (buildX + pos.xFt * scale),
+      offsetY: plan.y - (buildY + pos.yFt * scale),
     };
     setActiveIdx(idx);
     setActiveMode('drag');
@@ -295,50 +482,43 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
   function handleRotateStart(e, idx) {
     e.preventDefault();
     e.stopPropagation();
+    capturePointer(e);
     const pos = posFt[idx];
     const pl  = placements[idx];
     const sw  = pl.widthFt * scale;
     const sh  = pl.depthFt * scale;
-    const cx  = buildX + pos.xFt * scale + sw / 2;
-    const cy  = buildY + pos.yFt * scale + sh / 2;
-    dragRef.current = { mode: 'rotate', idx, cx, cy };
+    dragRef.current = {
+      mode: 'rotate', idx,
+      cx: buildX + pos.xFt * scale + sw / 2,
+      cy: buildY + pos.yFt * scale + sh / 2,
+    };
     setActiveIdx(idx);
     setActiveMode('rotate');
   }
 
-  // Per-product spacing lookup (in feet, defaults to 0)
-  const DEFAULT_SPACING = { front: 0, back: 0, left: 0, right: 0 };
-  const spacingMap = Object.fromEntries(products.map((p) => [p.id, p.spacing ?? DEFAULT_SPACING]));
-  const getSpacing = (id) => spacingMap[id] ?? DEFAULT_SPACING;
-
-  // Compute every other building's rotated AABB plus its productId for spacing lookups
-  function otherBBoxes(skipIdx) {
-    return placements
-      .map((pl, i) => {
-        if (i === skipIdx) return null;
-        const pos = posFt[i] ?? { xFt: 0, yFt: 0 };
-        const sw  = pl.widthFt * scale;
-        const sh  = pl.depthFt * scale;
-        const cx  = pos.xFt * scale + sw / 2;
-        const cy  = pos.yFt * scale + sh / 2;
-        const bb  = rotatedBBox(cx, cy, sw, sh, rotations[i] ?? 0);
-        return { ...bb, productId: pl.productId };
-      })
-      .filter(Boolean);
+  // Empty-ground pointer-down → camera orbit (3D only)
+  function handleCameraStart(e) {
+    if (viewMode !== '3d') return;
+    if (e.defaultPrevented) return;
+    capturePointer(e);
+    const pt = getSvgPoint(e, svgRef.current);
+    dragRef.current = {
+      mode: 'camera',
+      startSX: pt.x, startSY: pt.y,
+      startYaw: yaw, startPitch: pitch,
+    };
+    setActiveMode('camera');
   }
 
-  // Conflict check using per-product, per-side spacing.
-  // Required gap between A and B = max of the two sides facing each other.
-  function bboxesConflict(a, b, sa, sb) {
-    const aRight = sa.right * scale, aLeft = sa.left * scale;
-    const aFront = sa.front * scale, aBack = sa.back * scale;
-    const bRight = sb.right * scale, bLeft = sb.left * scale;
-    const bFront = sb.front * scale, bBack = sb.back * scale;
-    if (a.x + a.w + Math.max(aRight, bLeft) <= b.x) return false;
-    if (b.x + b.w + Math.max(bRight, aLeft) <= a.x) return false;
-    if (a.y + a.h + Math.max(aFront, bBack) <= b.y) return false;
-    if (b.y + b.h + Math.max(bFront, aBack) <= a.y) return false;
-    return true;
+  function clampRotated(xPx, yPx, sw, sh, angleDeg) {
+    const rad = angleDeg * DEG;
+    const c = Math.abs(Math.cos(rad)), s = Math.abs(Math.sin(rad));
+    const hw = (sw * c + sh * s) / 2;
+    const hh = (sw * s + sh * c) / 2;
+    return {
+      xPx: Math.max(hw - sw / 2, Math.min(buildW - sw / 2 - hw, xPx)),
+      yPx: Math.max(hh - sh / 2, Math.min(buildH - sh / 2 - hh, yPx)),
+    };
   }
 
   function handleMouseMove(e) {
@@ -346,34 +526,40 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
     if (!d) return;
     const pt = getSvgPoint(e, svgRef.current);
 
+    if (d.mode === 'camera') {
+      const dx = pt.x - d.startSX;
+      const dy = pt.y - d.startSY;
+      setYaw(d.startYaw + dx * 0.6);
+      setPitch(Math.max(MIN_PITCH, Math.min(MAX_PITCH, d.startPitch + dy * 0.4)));
+      return;
+    }
+
+    const plan = invProj(pt.x, pt.y, v);
+
     if (d.mode === 'drag') {
       const pl  = placements[d.idx];
       const sw  = pl.widthFt * scale;
       const sh  = pl.depthFt * scale;
       const rot = rotations[d.idx] ?? 0;
       const { xPx: nx, yPx: ny } = clampRotated(
-        pt.x - buildX - d.offsetX, pt.y - buildY - d.offsetY,
-        sw, sh, rot, buildW, buildH
+        plan.x - buildX - d.offsetX, plan.y - buildY - d.offsetY,
+        sw, sh, rot
       );
-
       setPosFt((prev) => {
         const next = [...prev];
         next[d.idx] = { xFt: nx / scale, yFt: ny / scale };
         return next;
       });
     } else if (d.mode === 'rotate') {
-      const angle = Math.atan2(pt.y - d.cy, pt.x - d.cx) * (180 / Math.PI) + 90;
+      const angle = Math.atan2(plan.y - d.cy, plan.x - d.cx) * (180 / Math.PI) + 90;
       const pl  = placements[d.idx];
       const sw  = pl.widthFt * scale;
       const sh  = pl.depthFt * scale;
       const pos = posFt[d.idx];
       if (!pos) return;
-
-      // Re-clamp position with the new rotation so the building stays inside
       const { xPx: nx, yPx: ny } = clampRotated(
-        pos.xFt * scale, pos.yFt * scale, sw, sh, angle, buildW, buildH
+        pos.xFt * scale, pos.yFt * scale, sw, sh, angle
       );
-
       setRotations((prev) => {
         const next = [...prev];
         next[d.idx] = angle;
@@ -394,24 +580,42 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
     setActiveMode(null);
   }
 
+  function resetView() {
+    setYaw(DEFAULT_YAW);
+    setPitch(DEFAULT_PITCH);
+  }
+  function topDownView() {
+    setPitch(MAX_PITCH);
+  }
 
-  const covered     = placements.reduce((s, pl) => s + pl.widthFt * pl.depthFt, 0);
-  const coveragePct = ((covered / parcel.sqft) * 100).toFixed(1);
-  const totalUnits  = placements.reduce((s, p) => s + (productMap[p.productId]?.units ?? 1), 0);
+  const DEFAULT_SPACING = { front: 0, back: 0, left: 0, right: 0 };
+  const spacingMap = Object.fromEntries(products.map((p) => [p.id, p.spacing ?? DEFAULT_SPACING]));
+  const getSpacing = (id) => spacingMap[id] ?? DEFAULT_SPACING;
 
-  // Determine which buildings violate spacing/overlap with any other building
+  function bboxesConflict(a, b, sa, sb) {
+    const aRight = sa.right * scale, aLeft = sa.left * scale;
+    const aFront = sa.front * scale, aBack = sa.back * scale;
+    const bRight = sb.right * scale, bLeft = sb.left * scale;
+    const bFront = sb.front * scale, bBack = sb.back * scale;
+    if (a.x + a.w + Math.max(aRight, bLeft) <= b.x) return false;
+    if (b.x + b.w + Math.max(bRight, aLeft) <= a.x) return false;
+    if (a.y + a.h + Math.max(aFront, bBack) <= b.y) return false;
+    if (b.y + b.h + Math.max(bFront, aBack) <= a.y) return false;
+    return true;
+  }
+
   const nonCompliant = new Set();
   for (let i = 0; i < placements.length; i++) {
     const pi = posFt[i] ?? { xFt: 0, yFt: 0 };
     const swi = placements[i].widthFt * scale;
     const shi = placements[i].depthFt * scale;
-    const bbi = rotatedBBox(pi.xFt * scale + swi / 2, pi.yFt * scale + shi / 2, swi, shi, rotations[i] ?? 0);
+    const bbi = rotatedBBox(buildX + pi.xFt * scale + swi / 2, buildY + pi.yFt * scale + shi / 2, swi, shi, rotations[i] ?? 0);
     const si  = getSpacing(placements[i].productId);
     for (let j = i + 1; j < placements.length; j++) {
       const pj = posFt[j] ?? { xFt: 0, yFt: 0 };
       const swj = placements[j].widthFt * scale;
       const shj = placements[j].depthFt * scale;
-      const bbj = rotatedBBox(pj.xFt * scale + swj / 2, pj.yFt * scale + shj / 2, swj, shj, rotations[j] ?? 0);
+      const bbj = rotatedBBox(buildX + pj.xFt * scale + swj / 2, buildY + pj.yFt * scale + shj / 2, swj, shj, rotations[j] ?? 0);
       const sj  = getSpacing(placements[j].productId);
       if (bboxesConflict(bbi, bbj, si, sj)) {
         nonCompliant.add(i);
@@ -421,26 +625,107 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
   }
   const hasViolation = nonCompliant.size > 0;
 
+  const covered     = placements.reduce((s, pl) => s + pl.widthFt * pl.depthFt, 0);
+  const coveragePct = ((covered / parcel.sqft) * 100).toFixed(1);
+  const totalUnits  = placements.reduce((s, p) => s + (productMap[p.productId]?.units ?? 1), 0);
+
+  const trees = (() => {
+    const rng = seededRng(42);
+    const list = [];
+    const margin = 6;
+    for (let i = 0; i < 56 && list.length < 14; i++) {
+      const r = rng();
+      const zone = Math.floor(r * 4);
+      let x, y;
+      if (zone === 0) { x = rng() * pW; y = rng() * sbRear; }
+      else if (zone === 1) { x = rng() * pW; y = pH - rng() * sbFront; }
+      else if (zone === 2) { x = rng() * sbSide; y = sbRear + rng() * (pH - sbFront - sbRear); }
+      else { x = pW - rng() * sbSide; y = sbRear + rng() * (pH - sbFront - sbRear); }
+      if (x > margin && x < pW - margin && y > margin && y < pH - margin) {
+        list.push({ x, y, r: 4 + rng() * 4 });
+      }
+    }
+    return list;
+  })();
+
+  // Depth-sorted scene items (use actual view depth formula)
+  const sceneItems = [];
+  placements.forEach((pl, i) => {
+    const pos = posFt[i] ?? { xFt: 0, yFt: 0 };
+    const bcx = buildX + pos.xFt * scale + pl.widthFt * scale / 2;
+    const bcy = buildY + pos.yFt * scale + pl.depthFt * scale / 2;
+    sceneItems.push({ type: 'building', idx: i, depth: depthOf(bcx, bcy, v) });
+  });
+  trees.forEach((t, i) => {
+    sceneItems.push({ type: 'tree', idx: i, tree: t, depth: depthOf(t.x, t.y, v) });
+  });
+  sceneItems.sort((a, b) => a.depth - b.depth);
+
+  if (activeIdx !== null) {
+    const at = sceneItems.findIndex(x => x.type === 'building' && x.idx === activeIdx);
+    if (at !== -1) {
+      const [active] = sceneItems.splice(at, 1);
+      sceneItems.push(active);
+    }
+  }
+
+  const parcelScreen = parcelCornersPlan.map(([x, y]) => proj(x, y, 0, v));
+  const setbackRects = [
+    [[0, 0], [pW, 0], [pW, sbRear], [0, sbRear]],
+    [[0, pH - sbFront], [pW, pH - sbFront], [pW, pH], [0, pH]],
+    [[0, sbRear], [sbSide, sbRear], [sbSide, pH - sbFront], [0, pH - sbFront]],
+    [[pW - sbSide, sbRear], [pW, sbRear], [pW, pH - sbFront], [pW - sbSide, pH - sbFront]],
+  ].map(poly => poly.map(([x, y]) => proj(x, y, 0, v)));
+
+  const buildCornersScreen = [
+    [buildX, buildY], [buildX + buildW, buildY],
+    [buildX + buildW, buildY + buildH], [buildX, buildY + buildH],
+  ].map(([x, y]) => proj(x, y, 0, v));
+
+  // Ground texture matrix: maps (plan x, y) to screen — for SVG patternTransform
+  const groundMatrix = `matrix(${cosA}, ${sinA * sinP}, ${-sinA}, ${cosA * sinP}, 0, 0)`;
+
+  // Compass: point arrow toward world +y = -cosA*sinP on screen (flipped to show screen north as "up")
+  // "North" = plan -y direction → screen (sinA, -cosA*sinP). Angle (clockwise from +x):
+  const northAngleDeg = Math.atan2(-cosA * sinP, sinA) * 180 / Math.PI;
+  const compassX = SVG_W - LABEL_PAD + 12;
+  const compassY = LABEL_PAD - 10;
+
+  const midX = SVG_W / 2;
+
   return (
     <div className="birds-eye-wrap">
+      <div className="birds-eye-tabs" role="tablist" aria-label="View mode">
+        <button type="button" role="tab" aria-selected={viewMode === '3d'}
+          className={viewMode === '3d' ? 'active' : ''}
+          onClick={() => setViewMode('3d')}>3D view</button>
+        <button type="button" role="tab" aria-selected={viewMode === '2d'}
+          className={viewMode === '2d' ? 'active' : ''}
+          onClick={() => setViewMode('2d')}>2D view</button>
+      </div>
       <svg
         ref={svgRef}
         viewBox={`0 0 ${SVG_W} ${SVG_H}`}
         className="birds-eye-svg"
         aria-label="Birds-eye parcel layout"
-        style={{ cursor: activeMode === 'drag' ? 'grabbing' : activeMode === 'rotate' ? 'crosshair' : 'default' }}
-        onMouseMove={handleMouseMove}
-        onMouseUp={handleMouseUp}
-        onMouseLeave={handleMouseUp}
+        style={{ cursor: activeMode === 'drag' ? 'grabbing'
+                       : activeMode === 'rotate' ? 'crosshair'
+                       : activeMode === 'camera' ? 'grabbing'
+                       : viewMode === '3d' ? 'grab'
+                       : 'default', touchAction: 'none' }}
+        onPointerDown={handleCameraStart}
+        onPointerMove={handleMouseMove}
+        onPointerUp={handleMouseUp}
+        onPointerCancel={handleMouseUp}
       >
         <defs>
-          <pattern id="grass-pat" x="0" y="0" width="10" height="10" patternUnits="userSpaceOnUse">
+          <pattern id="grass-pat" x="0" y="0" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform={groundMatrix}>
             <rect width="10" height="10" fill="#3a7d44" />
             <circle cx="2" cy="3" r="0.8" fill="#2d6a38" opacity="0.5" />
             <circle cx="7" cy="7" r="0.8" fill="#2d6a38" opacity="0.5" />
             <circle cx="5" cy="1" r="0.5" fill="#4a9458" opacity="0.4" />
           </pattern>
-          <pattern id="setback-pat" x="0" y="0" width="10" height="10" patternUnits="userSpaceOnUse">
+          <pattern id="setback-pat" x="0" y="0" width="10" height="10" patternUnits="userSpaceOnUse" patternTransform={groundMatrix}>
             <rect width="10" height="10" fill="#4a9a55" />
             <circle cx="3" cy="4" r="0.7" fill="#3a8045" opacity="0.4" />
             <circle cx="8" cy="8" r="0.7" fill="#3a8045" opacity="0.4" />
@@ -452,43 +737,44 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
           </pattern>
         </defs>
 
-        {/* ── Surroundings ── */}
         <rect x={0} y={0} width={SVG_W} height={SVG_H} fill="url(#pave-pat)" />
+        <polygon points={pts(parcelScreen)} fill="url(#grass-pat)" stroke="#1a3a20" strokeWidth="1.5" />
 
-        {/* ── Parcel ── */}
-        <rect x={ox} y={oy} width={pW} height={pH} fill="url(#grass-pat)" />
-        <rect x={ox} y={oy} width={pW} height={pH} fill="none" stroke="#1a3a20" strokeWidth="1.5" />
+        {setbackRects.map((poly, i) => (
+          <polygon key={i} points={pts(poly)} fill="url(#setback-pat)" opacity="0.7" />
+        ))}
 
-        {/* ── Setback zones ── */}
-        <rect x={ox} y={oy} width={pW} height={sbRear} fill="url(#setback-pat)" opacity="0.7" />
-        <rect x={ox} y={oy+pH-sbFront} width={pW} height={sbFront} fill="url(#setback-pat)" opacity="0.7" />
-        <rect x={ox} y={oy+sbRear} width={sbSide} height={pH-sbFront-sbRear} fill="url(#setback-pat)" opacity="0.7" />
-        <rect x={ox+pW-sbSide} y={oy+sbRear} width={sbSide} height={pH-sbFront-sbRear} fill="url(#setback-pat)" opacity="0.7" />
-        <rect x={buildX} y={buildY} width={buildW} height={buildH}
-          fill="none" stroke="rgba(255,255,255,0.35)" strokeWidth="1" strokeDasharray="5 3" />
+        <polygon points={pts(buildCornersScreen)} fill="none"
+          stroke="rgba(255,255,255,0.35)" strokeWidth="1" strokeDasharray="5 3" />
 
-        {/* ── Trees ── */}
-        <Trees ox={ox} oy={oy} pW={pW} pH={pH}
-          sbFront={sbFront} sbRear={sbRear} sbSide={sbSide} scale={scale} />
-
-        {/* ── Buildings ── */}
-        {placements.map((pl, i) => {
+        {sceneItems.map((item) => {
+          if (item.type === 'tree') {
+            return <Tree key={`t-${item.idx}`} xPx={item.tree.x} yPx={item.tree.y} r={item.tree.r}
+              v={v} scale={scale} />;
+          }
+          const i = item.idx;
+          const pl = placements[i];
+          const prod = productMap[pl.productId];
           const pos = posFt[i] ?? { xFt: pl.xFt ?? 0, yFt: pl.yFt ?? 0 };
           return (
-            <Building key={i} pl={pl} color={colorMap[pl.productId] ?? COLORS[0]}
-              scale={scale} buildX={buildX} buildY={buildY}
-              xPx={pos.xFt * scale} yPx={pos.yFt * scale}
+            <Building key={`b-${i}`} pl={pl}
+              stories={prod?.stories ?? 1}
+              units={prod?.units ?? 1}
+              color={colorMap[pl.productId] ?? COLORS[0]}
+              scale={scale}
+              xPx={buildX + pos.xFt * scale}
+              yPx={buildY + pos.yFt * scale}
               rotation={rotations[i] ?? 0}
+              v={v}
               isDragging={activeIdx === i && activeMode === 'drag'}
               isRotating={activeIdx === i && activeMode === 'rotate'}
               isViolating={nonCompliant.has(i)}
-              productName={productMap[pl.productId]?.name}
+              productName={prod?.name}
               onMouseDown={(e) => handleDragStart(e, i)}
               onRotateStart={(e) => handleRotateStart(e, i)} />
           );
         })}
 
-        {/* ── Distance overlay (sides + corners) — shown during drag or rotate ── */}
         {(activeMode === 'drag' || activeMode === 'rotate') && activeIdx !== null && (() => {
           const pl  = placements[activeIdx];
           const pos = posFt[activeIdx];
@@ -497,19 +783,28 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
           const sw  = pl.widthFt * scale;
           const sh  = pl.depthFt * scale;
           const rot = rotations[activeIdx] ?? 0;
-          const cx  = pos.xFt * scale + sw / 2;
-          const cy  = pos.yFt * scale + sh / 2;
-          const bb  = rotatedBBox(cx, cy, sw, sh, rot);
-          const others = otherBBoxes(activeIdx);
+          const bcx = buildX + pos.xFt * scale + sw / 2;
+          const bcy = buildY + pos.yFt * scale + sh / 2;
+          const bb  = rotatedBBox(bcx, bcy, sw, sh, rot);
 
-          // For each side, find the nearest obstacle position (boundary or other building edge)
-          // Returns position in buildX/buildY-relative pixel space.
+          const others = placements.map((plo, i) => {
+            if (i === activeIdx) return null;
+            const po  = posFt[i] ?? { xFt: 0, yFt: 0 };
+            const swo = plo.widthFt * scale;
+            const sho = plo.depthFt * scale;
+            return rotatedBBox(
+              buildX + po.xFt * scale + swo / 2,
+              buildY + po.yFt * scale + sho / 2,
+              swo, sho, rotations[i] ?? 0
+            );
+          }).filter(Boolean);
+
           function nearest(side) {
             let edge;
-            if (side === 'left')   edge = 0;
-            if (side === 'right')  edge = buildW;
-            if (side === 'top')    edge = 0;
-            if (side === 'bottom') edge = buildH;
+            if (side === 'left')   edge = buildX;
+            if (side === 'right')  edge = buildX + buildW;
+            if (side === 'top')    edge = buildY;
+            if (side === 'bottom') edge = buildY + buildH;
             for (const o of others) {
               if (side === 'left' || side === 'right') {
                 const vOverlap = Math.max(bb.y, o.y) < Math.min(bb.y + bb.h, o.y + o.h);
@@ -526,108 +821,99 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
             return edge;
           }
 
-          const obsLeft   = nearest('left');
-          const obsRight  = nearest('right');
-          const obsTop    = nearest('top');     // 'back' / rear
-          const obsBottom = nearest('bottom');  // 'front'
+          const obsLeft = nearest('left'),  obsRight  = nearest('right');
+          const obsTop  = nearest('top'),   obsBottom = nearest('bottom');
 
           const gapLeft   = Math.max(0, Math.round((bb.x - obsLeft) / scale));
           const gapRight  = Math.max(0, Math.round((obsRight - bb.x - bb.w) / scale));
           const gapBack   = Math.max(0, Math.round((bb.y - obsTop) / scale));
           const gapFront  = Math.max(0, Math.round((obsBottom - bb.y - bb.h) / scale));
 
-          // Absolute SVG coordinates
-          const bx = buildX + bb.x;
-          const by = buildY + bb.y;
-          const bw = bb.w;
-          const bh = bb.h;
+          const p = (px, py) => proj(px, py, 0, v);
+          const topCenter   = { x: bb.x + bb.w / 2, y: bb.y };
+          const botCenter   = { x: bb.x + bb.w / 2, y: bb.y + bb.h };
+          const leftCenter  = { x: bb.x,            y: bb.y + bb.h / 2 };
+          const rightCenter = { x: bb.x + bb.w,     y: bb.y + bb.h / 2 };
+          const tTopEnd     = { x: bb.x + bb.w / 2, y: obsTop };
+          const tBotEnd     = { x: bb.x + bb.w / 2, y: obsBottom };
+          const tLeftEnd    = { x: obsLeft,         y: bb.y + bb.h / 2 };
+          const tRightEnd   = { x: obsRight,        y: bb.y + bb.h / 2 };
 
-          const Pill = ({ x, y, text, accent }) => (
-            <g>
-              <rect x={x - 9} y={y - 5} width={18} height={10} rx="2"
-                fill={accent ? '#1d2cf3' : 'rgba(15,23,42,0.88)'} />
-              <text x={x} y={y + 3} textAnchor="middle"
-                fill="#ffffff" fontSize="6" fontWeight="700">
-                {text}
-              </text>
-            </g>
-          );
+          const Tick = ({ a, b }) => {
+            const pa = p(a.x, a.y), pb = p(b.x, b.y);
+            return <line x1={pa.x} y1={pa.y} x2={pb.x} y2={pb.y}
+              stroke="rgba(29,44,243,0.85)" strokeWidth="1" strokeDasharray="3 2" />;
+          };
+          const Pill = ({ planPt, text }) => {
+            const pp = p(planPt.x, planPt.y);
+            return (
+              <g>
+                <rect x={pp.x - 11} y={pp.y - 6} width="22" height="12" rx="3" fill="#1d2cf3" />
+                <text x={pp.x} y={pp.y + 3} textAnchor="middle" fill="#ffffff" fontSize="7" fontWeight="700">
+                  {text}
+                </text>
+              </g>
+            );
+          };
 
-          const Tick = ({ x1, y1, x2, y2 }) => (
-            <line x1={x1} y1={y1} x2={x2} y2={y2}
-              stroke="rgba(29,44,243,0.85)" strokeWidth="1" strokeDasharray="3 2" />
-          );
-
-          // Tick endpoints (absolute) — go to nearest obstacle, not all the way to boundary
-          const tickTopY    = buildY + obsTop;
-          const tickBottomY = buildY + obsBottom;
-          const tickLeftX   = buildX + obsLeft;
-          const tickRightX  = buildX + obsRight;
-
-          // Pill inset from each edge (pulled inside the building)
-          const SIDE_INSET = 6;
+          const pillTop   = { x: (topCenter.x   + tTopEnd.x)   / 2, y: (topCenter.y   + tTopEnd.y)   / 2 };
+          const pillBot   = { x: (botCenter.x   + tBotEnd.x)   / 2, y: (botCenter.y   + tBotEnd.y)   / 2 };
+          const pillLeft  = { x: (leftCenter.x  + tLeftEnd.x)  / 2, y: (leftCenter.y  + tLeftEnd.y)  / 2 };
+          const pillRight = { x: (rightCenter.x + tRightEnd.x) / 2, y: (rightCenter.y + tRightEnd.y) / 2 };
 
           return (
             <g style={{ pointerEvents: 'none' }}>
-              {/* Dotted tick lines stay OUTSIDE — from building edge to obstacle */}
-              <Tick x1={bx + bw / 2} y1={by}      x2={bx + bw / 2} y2={tickTopY} />
-              <Tick x1={bx + bw / 2} y1={by + bh} x2={bx + bw / 2} y2={tickBottomY} />
-              <Tick x1={bx}          y1={by + bh / 2} x2={tickLeftX}  y2={by + bh / 2} />
-              <Tick x1={bx + bw}     y1={by + bh / 2} x2={tickRightX} y2={by + bh / 2} />
-
-              {/* Hide pills that would overlap given the building's current size */}
-              {/* Top/bottom side pills need a clear vertical strip */}
-              {bh >= 22 && (
-                <>
-                  <Pill x={bx + bw / 2} y={by + SIDE_INSET}      text={`${gapBack}'`}  accent />
-                  <Pill x={bx + bw / 2} y={by + bh - SIDE_INSET} text={`${gapFront}'`} accent />
-                </>
-              )}
-              {/* Left/right side pills need a clear horizontal strip */}
-              {bw >= 40 && (
-                <>
-                  <Pill x={bx + SIDE_INSET + 5}      y={by + bh / 2} text={`${gapLeft}'`}  accent />
-                  <Pill x={bx + bw - SIDE_INSET - 5} y={by + bh / 2} text={`${gapRight}'`} accent />
-                </>
-              )}
+              <Tick a={topCenter}   b={tTopEnd} />
+              <Tick a={botCenter}   b={tBotEnd} />
+              <Tick a={leftCenter}  b={tLeftEnd} />
+              <Tick a={rightCenter} b={tRightEnd} />
+              {bb.y - obsTop > 6              && <Pill planPt={pillTop}   text={`${gapBack}'`}  />}
+              {obsBottom - (bb.y + bb.h) > 6  && <Pill planPt={pillBot}   text={`${gapFront}'`} />}
+              {bb.x - obsLeft > 6             && <Pill planPt={pillLeft}  text={`${gapLeft}'`}  />}
+              {obsRight - (bb.x + bb.w) > 6   && <Pill planPt={pillRight} text={`${gapRight}'`} />}
             </g>
           );
         })()}
 
-        {/* ── Loading overlay ── */}
         {isLoading && (
           <>
             <rect x={0} y={0} width={SVG_W} height={SVG_H} fill="rgba(15,23,42,0.72)" />
-            <text x={midX} y={SVG_H/2-8} textAnchor="middle" fill="#475569" fontSize="14">
+            <text x={midX} y={SVG_H / 2 - 8} textAnchor="middle" fill="#e2e8f0" fontSize="14">
               Generating layout…
             </text>
-            <text x={midX} y={SVG_H/2+12} textAnchor="middle" fill="#334155" fontSize="11">
+            <text x={midX} y={SVG_H / 2 + 12} textAnchor="middle" fill="#cbd5e1" fontSize="11">
               This may take a few seconds
             </text>
           </>
         )}
 
-        {/* ── Compass ── */}
-        <g>
-          <circle cx={ox+pW-16} cy={oy+16} r="12" fill="rgba(0,0,0,0.35)" />
-          <text x={ox+pW-16} y={oy+20} textAnchor="middle" fill="#f1f5f9" fontSize="11" fontWeight="700">N</text>
-          <line x1={ox+pW-16} y1={oy+8} x2={ox+pW-16} y2={oy+14} stroke="#f1f5f9" strokeWidth="1.5" />
+        {/* Compass: rotates to keep "N" pointing at world north */}
+        <g transform={`translate(${compassX},${compassY})`}>
+          <circle r="14" fill="rgba(15,23,42,0.72)" />
+          <g transform={`rotate(${northAngleDeg + 90})`}>
+            <line x1="0" y1="-10" x2="0" y2="8" stroke="#f1f5f9" strokeWidth="1.3" />
+            <polygon points="0,-11 -3,-5 3,-5" fill="#ef4444" />
+            <text x="0" y="-13" textAnchor="middle" fill="#f1f5f9" fontSize="8" fontWeight="700"
+              transform={`rotate(${-(northAngleDeg + 90)})`}>N</text>
+          </g>
         </g>
 
-        {/* ── Frontage dimension ── */}
-        <line x1={ox} y1={oy-18} x2={ox+pW} y2={oy-18} stroke="#334155" strokeWidth="1" />
-        <line x1={ox} y1={oy-22} x2={ox} y2={oy-14} stroke="#334155" strokeWidth="1" />
-        <line x1={ox+pW} y1={oy-22} x2={ox+pW} y2={oy-14} stroke="#334155" strokeWidth="1" />
-        <text x={midX} y={oy-22} textAnchor="middle" fill="#475569" fontSize="11">{parcel.frontage} ft</text>
-
-        {/* ── Depth dimension ── */}
-        <line x1={ox-20} y1={oy} x2={ox-20} y2={oy+pH} stroke="#334155" strokeWidth="1" />
-        <line x1={ox-24} y1={oy} x2={ox-16} y2={oy} stroke="#334155" strokeWidth="1" />
-        <line x1={ox-24} y1={oy+pH} x2={ox-16} y2={oy+pH} stroke="#334155" strokeWidth="1" />
-        <text x={ox-32} y={oy+pH/2} textAnchor="middle" fill="#475569" fontSize="11"
-          transform={`rotate(-90, ${ox-32}, ${oy+pH/2})`}>
-          {parcel.depth} ft
-        </text>
+        {/* Orbit hint / view buttons (3D only) */}
+        {viewMode === '3d' && (
+          <g transform={`translate(${LABEL_PAD - 4}, ${SVG_H - LABEL_PAD / 2 + 4})`} style={{ pointerEvents: 'all' }}>
+            <g onClick={resetView} style={{ cursor: 'pointer' }}>
+              <rect x="0" y="-11" width="58" height="18" rx="9" fill="rgba(15,23,42,0.8)" />
+              <text x="29" y="2" textAnchor="middle" fill="#f1f5f9" fontSize="9" fontWeight="600">Reset view</text>
+            </g>
+            <g onClick={topDownView} transform="translate(66,0)" style={{ cursor: 'pointer' }}>
+              <rect x="0" y="-11" width="62" height="18" rx="9" fill="rgba(15,23,42,0.8)" />
+              <text x="31" y="2" textAnchor="middle" fill="#f1f5f9" fontSize="9" fontWeight="600">Top-down</text>
+            </g>
+            <text x="140" y="2" fill="rgba(15,23,42,0.55)" fontSize="9" fontStyle="italic">
+              drag empty ground to orbit · yaw {Math.round(((yaw % 360) + 360) % 360)}° · pitch {Math.round(pitch)}°
+            </text>
+          </g>
+        )}
       </svg>
 
       {hasViolation && (

@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:www.volumod.com)",
+      "Bash(npm run *)",
+      "Bash(git push *)"
+    ]
+  }
+}
