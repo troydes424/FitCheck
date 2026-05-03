@@ -1,4 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
+import CesiumView from './CesiumView';
+import Offset from 'polygon-offset';
 
 const SVG_W = 720;
 const SVG_H = 420;
@@ -93,11 +95,168 @@ function pts(arr) {
   return arr.map(p => `${p.x.toFixed(2)},${p.y.toFixed(2)}`).join(' ');
 }
 
-function Tree({ xPx, yPx, r, v, scale }) {
+// Convert a Regrid-style outer ring ([[lon, lat], …]) to plan-pixel coords
+// anchored to (0, 0) at the parcel bbox's NW corner. y grows south (same as
+// SVG plan convention used elsewhere in this component).
+const FEET_PER_DEG_LAT = 364173;
+function ringToPlanCoords(ring, scale) {
+  if (!Array.isArray(ring) || ring.length < 3) return null;
+  const lats = ring.map(c => c[1]);
+  const midLat = lats.reduce((a, b) => a + b, 0) / lats.length;
+  const fpLon  = FEET_PER_DEG_LAT * Math.cos((midLat * Math.PI) / 180);
+  const xs = ring.map(c => c[0] * fpLon);
+  const ys = ring.map(c => c[1] * FEET_PER_DEG_LAT);
+  const minX = Math.min(...xs);
+  const maxY = Math.max(...ys);
+  return ring.map((_, i) => [(xs[i] - minX) * scale, (maxY - ys[i]) * scale]);
+}
+
+// Ray-casting point-in-polygon test. `poly` is an array of {x, y}.
+function pointInPolygon(px, py, poly) {
+  let inside = false;
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    const xi = poly[i].x, yi = poly[i].y;
+    const xj = poly[j].x, yj = poly[j].y;
+    const intersects = ((yi > py) !== (yj > py)) &&
+      (px < ((xj - xi) * (py - yi)) / (yj - yi) + xi);
+    if (intersects) inside = !inside;
+  }
+  return inside;
+}
+
+// True iff all four corners of a (possibly rotated) rectangle centred around
+// the top-left (xPx, yPx) are inside `poly`. Cheap proxy for "the whole
+// footprint is inside" — works for convex polygons; for mildly concave
+// polygons the edge midpoints may still poke out slightly, which we accept.
+function rectangleInsidePolygon(xPx, yPx, w, h, angleDeg, poly) {
+  if (!poly || poly.length < 3) return true;
+  const corners = footprintCorners(xPx, yPx, w, h, angleDeg);
+  for (const c of corners) {
+    if (!pointInPolygon(c.x, c.y, poly)) return false;
+  }
+  return true;
+}
+
+// Cast a ray from (startX, startY) in unit direction (dirX, dirY) and return
+// the parametric distance to the nearest polygon edge it hits, or Infinity
+// if none. `poly` is an array of {x, y}.
+function rayToPolygonDistance(startX, startY, dirX, dirY, poly) {
+  let tMin = Infinity;
+  const n = poly.length;
+  for (let i = 0; i < n; i++) {
+    const a = poly[i], b = poly[(i + 1) % n];
+    const ex = b.x - a.x, ey = b.y - a.y;
+    const denom = dirX * ey - dirY * ex;
+    if (Math.abs(denom) < 1e-9) continue; // ray parallel to this edge
+    const qx = a.x - startX, qy = a.y - startY;
+    const t = (qx * ey - qy * ex) / denom;            // ray parameter
+    const s = (qx * dirY - qy * dirX) / denom;        // segment parameter
+    if (t > 1e-6 && s >= -1e-6 && s <= 1 + 1e-6 && t < tMin) {
+      tMin = t;
+    }
+  }
+  return tMin;
+}
+
+// Signed area of a polygon (plan/screen y-down).
+// Positive = clockwise on screen, negative = counter-clockwise.
+function polygonSignedArea(ring) {
+  let s = 0;
+  const n = ring.length;
+  for (let i = 0; i < n; i++) {
+    const a = ring[i], b = ring[(i + 1) % n];
+    s += a.x * b.y - b.x * a.y;
+  }
+  return s / 2;
+}
+
+// Inset a polygon (concave or convex) by a uniform `distance` (plan pixels).
+// Uses the `polygon-offset` library, which handles reflex corners correctly
+// — naive miter offsetting produces "spike" artifacts at concave corners
+// because the offset lines of the two adjacent edges intersect outside the
+// polygon. This routine truncates miters and removes self-intersections.
+//
+// `setbacks` is `{ front, rear, side }`; we collapse them to a single
+// uniform distance using the largest value (most conservative). True
+// per-side setbacks on an arbitrary polygon are ill-defined without an
+// address-side annotation, and per-edge directional weighting produced
+// inconsistent results on irregular lots.
+function polygonInset(ring, { front, rear, side }) {
+  const n = ring.length;
+  if (n < 3) return null;
+  const distance = Math.max(front, rear, side);
+  if (!(distance > 0)) return ring.map((p) => ({ x: p.x, y: p.y }));
+
+  const origArea = polygonSignedArea(ring);
+  if (Math.abs(origArea) < 1e-6) return null;
+
+  // polygon-offset expects a closed ring with CCW exterior winding. Our
+  // y-down screen polygon has positive shoelace = CW visually, so we
+  // reverse to CCW before handing it over.
+  const path = (origArea > 0 ? [...ring].reverse() : ring).map((p) => [p.x, p.y]);
+  const first = path[0], last = path[path.length - 1];
+  if (first[0] !== last[0] || first[1] !== last[1]) path.push([first[0], first[1]]);
+
+  let result;
+  try {
+    const o = new Offset();
+    // .padding(d) shrinks the polygon inward by d (correct for setback);
+    // .margin(d) is the opposite (outward grow). The library returns
+    // either a closed ring [[x,y],...] or an array of them when the
+    // inset disconnects into multiple pieces.
+    result = o.data(path).padding(distance);
+  } catch {
+    return null;
+  }
+  if (!result || !result.length) return null;
+
+  // Pick the largest sub-polygon (by absolute area) when the inset splits.
+  let bestRing = null, bestAbsA = 0;
+  for (const candidate of result) {
+    if (!Array.isArray(candidate) || candidate.length < 3) continue;
+    const ringAsObjs = candidate.map(([x, y]) => ({ x, y }));
+    const a = Math.abs(polygonSignedArea(ringAsObjs));
+    if (a > bestAbsA) { bestAbsA = a; bestRing = ringAsObjs; }
+  }
+  if (!bestRing) return null;
+  if (bestAbsA < Math.abs(origArea) * 0.02) return null; // setbacks ate the lot
+
+  return bestRing;
+}
+
+// Build an SVG path with an outer ring and an optional inner hole, using the
+// evenodd fill-rule to paint only the area between them (the setback band).
+function outerMinusInnerPath(outer, inner) {
+  if (!outer?.length) return '';
+  const seg = (ring) => {
+    let s = `M ${ring[0].x.toFixed(2)} ${ring[0].y.toFixed(2)}`;
+    for (let i = 1; i < ring.length; i++) s += ` L ${ring[i].x.toFixed(2)} ${ring[i].y.toFixed(2)}`;
+    return s + ' Z';
+  };
+  let d = seg(outer);
+  if (inner?.length >= 3) d += ' ' + seg(inner);
+  return d;
+}
+
+function Tree({ xPx, yPx, r, v, scale, realistic }) {
   const treeHPx = TREE_HEIGHT_FT * scale;
   const base = proj(xPx, yPx, 0, v);
   const top  = proj(xPx, yPx, treeHPx, v);
   const shPt = proj(xPx + 3, yPx + 3, 0, v);
+  if (realistic) {
+    return (
+      <g>
+        <ellipse cx={shPt.x + r * 0.4} cy={shPt.y} rx={r * 1.55} ry={r * 0.7}
+          fill="rgba(0,0,0,0.3)" filter="url(#soft-shadow)" />
+        <line x1={base.x} y1={base.y} x2={top.x} y2={top.y}
+          stroke="#4a2f1a" strokeWidth="1.5" strokeLinecap="round" />
+        <circle cx={top.x + r * 0.2} cy={top.y + r * 0.15} r={r * 1.05} fill="#1f5433" />
+        <circle cx={top.x}            cy={top.y}            r={r}         fill="#2d6a4f" />
+        <circle cx={top.x - r * 0.35} cy={top.y - r * 0.25} r={r * 0.7}  fill="#52b788" />
+        <circle cx={top.x - r * 0.55} cy={top.y - r * 0.45} r={r * 0.35} fill="#8fd1a8" />
+      </g>
+    );
+  }
   return (
     <g>
       <ellipse cx={shPt.x} cy={shPt.y} rx={r * 1.2} ry={r * 0.55} fill="rgba(0,0,0,0.22)" />
@@ -109,7 +268,7 @@ function Tree({ xPx, yPx, r, v, scale }) {
   );
 }
 
-function Building({ pl, stories, units, color, scale, xPx, yPx, rotation, v, isDragging, isRotating, isViolating, onMouseDown, onRotateStart, productName }) {
+function Building({ pl, stories, units, color, colorIdx, realistic, scale, xPx, yPx, rotation, v, isDragging, isRotating, isViolating, onMouseDown, onRotateStart, productName }) {
   const bw = pl.widthFt * scale;
   const bh = pl.depthFt * scale;
   const eaveFt   = stories * STORY_HEIGHT_FT + FOUNDATION_FT;
@@ -242,7 +401,8 @@ function Building({ pl, stories, units, color, scale, xPx, yPx, rotation, v, isD
           const poly = wallRect(ci, cj, fracCenter - halfWFrac, fracCenter + halfWFrac, zBot, zTop);
           nodes.push(
             <polygon key={`${key}-w${row}-${c}`} points={pts(poly)}
-              fill="#bfd8ec" stroke="rgba(40,30,20,0.5)" strokeWidth="0.45" />
+              fill={realistic ? 'url(#window-grad)' : '#bfd8ec'}
+              stroke="rgba(40,30,20,0.5)" strokeWidth="0.45" />
           );
           const mp1 = wallPoint(ci, cj, fracCenter, zBot);
           const mp2 = wallPoint(ci, cj, fracCenter, zTop);
@@ -263,7 +423,8 @@ function Building({ pl, stories, units, color, scale, xPx, yPx, rotation, v, isD
         const poly = wallRect(ci, cj, fracCenter - halfWFrac, fracCenter + halfWFrac, 0, doorHFt * scale);
         nodes.push(
           <polygon key={`${key}-d${d}`} points={pts(poly)}
-            fill="#3a2817" stroke="rgba(20,10,0,0.6)" strokeWidth="0.5" />
+            fill={realistic ? 'url(#door-grad)' : '#3a2817'}
+            stroke="rgba(20,10,0,0.6)" strokeWidth="0.5" />
         );
         const knob = wallPoint(ci, cj, fracCenter + halfWFrac * 0.55, doorHFt * scale * 0.5);
         nodes.push(<circle key={`${key}-k${d}`} cx={knob.x} cy={knob.y} r="0.55" fill="#d4af37" />);
@@ -275,9 +436,18 @@ function Building({ pl, stories, units, color, scale, xPx, yPx, rotation, v, isD
 
   const roofStroke = isViolating ? '#dc2626' : color.stroke;
 
+  const shadowOffLong = realistic ? Math.max(4, eavePx * 0.18) : shadowOff;
+  const shadowCornersRealistic = realistic
+    ? cornersBot.map(p => proj(p.x + shadowOffLong, p.y + shadowOffLong, 0, v))
+    : shadowCorners;
+
   return (
     <g>
-      <polygon points={pts(shadowCorners)} fill="rgba(0,0,0,0.3)" />
+      {realistic ? (
+        <polygon points={pts(shadowCornersRealistic)} fill="rgba(0,0,0,0.4)" filter="url(#soft-shadow)" />
+      ) : (
+        <polygon points={pts(shadowCorners)} fill="rgba(0,0,0,0.3)" />
+      )}
 
       <g onPointerDown={onMouseDown}
         style={{ cursor: isDragging ? 'grabbing' : 'grab', userSelect: 'none', touchAction: 'none' }}>
@@ -289,9 +459,14 @@ function Building({ pl, stories, units, color, scale, xPx, yPx, rotation, v, isD
 
         {roofPieces.map((piece, i) => {
           const base = isViolating ? 'rgba(220,38,38,0.75)' : color.roof;
-          const fill = piece.shade === 'light' ? base
-                     : piece.shade === 'dark'  ? color.stroke
-                     : base;
+          let fill;
+          if (realistic && !isViolating) {
+            fill = `url(#roof-grad-${colorIdx})`;
+          } else {
+            fill = piece.shade === 'light' ? base
+                 : piece.shade === 'dark'  ? color.stroke
+                 : base;
+          }
           return (
             <polygon key={`rp-${i}`} points={pts(piece.poly)}
               fill={fill} stroke={roofStroke}
@@ -393,13 +568,96 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
   const productMap = Object.fromEntries(products.map((p) => [p.id, p]));
 
   // ─── View mode + camera (yaw + pitch) ────────────────────────────
-  const [viewMode, setViewMode] = useState('3d'); // '3d' | '2d'
+  const [viewMode, setViewMode] = useState('realistic'); // '2d' | 'realistic' (3D v1) | 'satellite' | 'cesium'
   const [yaw,   setYaw]   = useState(DEFAULT_YAW);
   const [pitch, setPitch] = useState(DEFAULT_PITCH);
 
-  // In 2D mode, force a straight-down plan view (north-up)
-  const effectiveYaw   = viewMode === '2d' ? 0  : yaw;
-  const effectivePitch = viewMode === '2d' ? 90 : pitch;
+  // ─── Satellite (real lot) state ──────────────────────────────────
+  // Declared before it's used by effectiveYaw / sceneOx below.
+  const [address, setAddress]       = useState('');
+  const [geo, setGeo]               = useState(null); // { lat, lng, displayName }
+  const [satLoading, setSatLoading] = useState(false);
+  const [satError, setSatError]     = useState('');
+  const [satShift, setSatShift]     = useState({ x: 0, y: 0 }); // screen pixels
+  const [satYaw,   setSatYaw]       = useState(0);               // degrees
+  // OSM building footprints near the geocoded point — each is an array of {lat, lon}
+  const [osmBuildings, setOsmBuildings] = useState([]);
+
+  function resetAlignment() {
+    setSatShift({ x: 0, y: 0 });
+    setSatYaw(0);
+  }
+
+  const realistic  = viewMode === 'realistic';
+  const isFlatView = viewMode === '2d' || viewMode === 'satellite';
+
+  // In 2D / Satellite mode, force a straight-down plan view. Satellite allows
+  // user-controlled yaw so the lot can be rotated to match the actual parcel.
+  const effectiveYaw   = viewMode === 'satellite' ? satYaw
+                       : viewMode === '2d'        ? 0
+                       : yaw;
+  const effectivePitch = isFlatView ? 90 : pitch;
+
+  async function fetchOsmBuildings(lat, lng) {
+    // Overpass: all building=* ways within 80 m of the pin
+    const query = `[out:json][timeout:15];(way(around:80,${lat},${lng})["building"];);out geom;`;
+    const r = await fetch(`https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`);
+    const d = await r.json();
+    return (d.elements || [])
+      .filter(e => e.type === 'way' && Array.isArray(e.geometry) && e.geometry.length >= 3)
+      .map(e => e.geometry);
+  }
+
+  async function loadSatellite() {
+    const q = address.trim();
+    if (!q) return;
+    setSatLoading(true);
+    setSatError('');
+    setOsmBuildings([]);
+    try {
+      const r = await fetch(
+        `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(q)}&format=json&limit=1&addressdetails=0`,
+        { headers: { 'Accept-Language': 'en' } }
+      );
+      const d = await r.json();
+      if (!Array.isArray(d) || !d.length) throw new Error('Address not found');
+      const latF = parseFloat(d[0].lat);
+      const lonF = parseFloat(d[0].lon);
+      setGeo({ lat: latF, lng: lonF, displayName: d[0].display_name });
+      resetAlignment();
+
+      // Fetch OSM building footprints; if any found, auto-center the lot on
+      // the one nearest the address pin so the user doesn't have to pan.
+      try {
+        const buildings = await fetchOsmBuildings(latF, lonF);
+        setOsmBuildings(buildings);
+        if (buildings.length) {
+          const ftPerDegLat = 364000;
+          const ftPerDegLng = 364000 * Math.cos(latF * Math.PI / 180);
+          let best = null, bestD = Infinity;
+          for (const poly of buildings) {
+            const cLat = poly.reduce((s, p) => s + p.lat, 0) / poly.length;
+            const cLon = poly.reduce((s, p) => s + p.lon, 0) / poly.length;
+            const d2 = (cLat - latF) ** 2 + (cLon - lonF) ** 2;
+            if (d2 < bestD) { bestD = d2; best = { cLat, cLon }; }
+          }
+          if (best) {
+            const shiftX = (best.cLon - lonF) * ftPerDegLng * scale;
+            const shiftY = -(best.cLat - latF) * ftPerDegLat * scale;
+            setSatShift({ x: shiftX, y: shiftY });
+          }
+        }
+      } catch (osmErr) {
+        // Non-fatal: keep satellite without outlines
+        console.warn('OSM buildings unavailable', osmErr);
+      }
+    } catch (err) {
+      setGeo(null);
+      setSatError(err?.message || 'Lookup failed');
+    } finally {
+      setSatLoading(false);
+    }
+  }
 
   const cosA = Math.cos(effectiveYaw   * DEG);
   const sinA = Math.sin(effectiveYaw   * DEG);
@@ -428,8 +686,10 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
   const xrVals = parcelCornersPlan.map(([x, y]) => x * cosA - y * sinA);
   const xrMin = Math.min(...xrVals), xrMax = Math.max(...xrVals);
   const yrMin = Math.min(...yrVals), yrMax = Math.max(...yrVals);
-  const sceneOx = SVG_W / 2 - (xrMin + xrMax) / 2;
-  const sceneOy = SVG_H / 2 + reservedHeightPx * cosP / 2 - (yrMin + yrMax) / 2 * sinP;
+  const baseSceneOx = SVG_W / 2 - (xrMin + xrMax) / 2;
+  const baseSceneOy = SVG_H / 2 + reservedHeightPx * cosP / 2 - (yrMin + yrMax) / 2 * sinP;
+  const sceneOx = baseSceneOx + (viewMode === 'satellite' ? satShift.x : 0);
+  const sceneOy = baseSceneOy + (viewMode === 'satellite' ? satShift.y : 0);
 
   const v = { cosA, sinA, cosP, sinP, ox: sceneOx, oy: sceneOy };
 
@@ -437,14 +697,38 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
   const sbRear  = setbacks.rear  * scale;
   const sbSide  = setbacks.side  * scale;
 
-  const buildX = sbSide;
-  const buildY = sbRear;
-  const buildW = pW - sbSide * 2;
-  const buildH = pH - sbFront - sbRear;
+  // Parcel polygon + setback inset.
+  //   _ringPlanForClamp  → used for drag-clamping and distance-to-edge math
+  //                        (buildings may move freely anywhere inside this)
+  //   _insetPlanForClamp → retained only for rendering the setback band
+  const _ringPlanForClamp = ringToPlanCoords(parcel.ring, scale);
+  const _insetPlanForClamp = _ringPlanForClamp
+    ? polygonInset(_ringPlanForClamp.map(([x, y]) => ({ x, y })),
+                   { front: sbFront, rear: sbRear, side: sbSide })
+    : null;
 
-  const uniqueIds   = [...new Set(placements.map((p) => p.productId))];
-  const colorMap    = Object.fromEntries(uniqueIds.map((id, i) => [id, COLORS[i % COLORS.length]]));
-  const legendItems = uniqueIds.map((id) => ({ id, color: colorMap[id], name: productMap[id]?.name ?? id }));
+  // Buildable envelope: the parcel polygon's bbox. Buildings are free to
+  // move anywhere inside the parcel — the setback inset is informational
+  // only and no longer limits drag.
+  let buildX, buildY, buildW, buildH;
+  if (_ringPlanForClamp && _ringPlanForClamp.length >= 3) {
+    const rxs = _ringPlanForClamp.map(([x]) => x);
+    const rys = _ringPlanForClamp.map(([, y]) => y);
+    buildX = Math.min(...rxs);
+    buildY = Math.min(...rys);
+    buildW = Math.max(...rxs) - buildX;
+    buildH = Math.max(...rys) - buildY;
+  } else {
+    buildX = 0;
+    buildY = 0;
+    buildW = pW;
+    buildH = pH;
+  }
+
+  const uniqueIds    = [...new Set(placements.map((p) => p.productId))];
+  const colorMap     = Object.fromEntries(uniqueIds.map((id, i) => [id, COLORS[i % COLORS.length]]));
+  const colorIdxMap  = Object.fromEntries(uniqueIds.map((id, i) => [id, i % COLORS.length]));
+  const legendItems  = uniqueIds.map((id) => ({ id, color: colorMap[id], name: productMap[id]?.name ?? id }));
 
   const [posFt,     setPosFt]     = useState(() => placements.map((pl) => ({ xFt: pl.xFt ?? 0, yFt: pl.yFt ?? 0 })));
   const [rotations, setRotations] = useState(() => placements.map(() => 0));
@@ -458,6 +742,26 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
     setPosFt(placements.map((pl) => ({ xFt: pl.xFt ?? 0, yFt: pl.yFt ?? 0 })));
     setRotations(placements.map(() => 0));
   }, [placements]);
+
+  // Auto-load satellite imagery from the Regrid-supplied parcel centroid
+  // when the user switches to the Real-lot tab, skipping the manual address
+  // search and the OSM auto-center (the real polygon is already accurate).
+  useEffect(() => {
+    if (viewMode !== 'satellite') return;
+    if (geo) return;
+    const pLat = parcel?.centerLat;
+    const pLng = parcel?.centerLon;
+    if (pLat == null || pLng == null) return;
+
+    setGeo({ lat: pLat, lng: pLng, displayName: parcel.displayAddress || '' });
+    setAddress(parcel.displayAddress || '');
+    setSatShift({ x: 0, y: 0 });
+    setSatYaw(0);
+    setSatError('');
+    // Fetch building footprints in the background for visual context
+    fetchOsmBuildings(pLat, pLng).then(setOsmBuildings).catch(() => {});
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [viewMode, parcel?.centerLat, parcel?.centerLon]);
 
   function capturePointer(e) {
     try { svgRef.current?.setPointerCapture?.(e.pointerId); } catch { /* ignore */ }
@@ -496,18 +800,51 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
     setActiveMode('rotate');
   }
 
-  // Empty-ground pointer-down → camera orbit (3D only)
+  // Empty-ground pointer-down:
+  //  · satellite (lot loaded) → pan the lot over the imagery
+  //  · 3D / Realistic → camera orbit
+  //  · 2D / satellite-no-lot → no-op
   function handleCameraStart(e) {
-    if (viewMode !== '3d') return;
     if (e.defaultPrevented) return;
-    capturePointer(e);
     const pt = getSvgPoint(e, svgRef.current);
+
+    if (viewMode === 'satellite') {
+      if (!geo) return;
+      capturePointer(e);
+      dragRef.current = {
+        mode: 'pan-parcel',
+        startSX: pt.x, startSY: pt.y,
+        startShift: { ...satShift },
+      };
+      setActiveMode('pan-parcel');
+      return;
+    }
+
+    if (isFlatView) return;
+    capturePointer(e);
     dragRef.current = {
       mode: 'camera',
       startSX: pt.x, startSY: pt.y,
       startYaw: yaw, startPitch: pitch,
     };
     setActiveMode('camera');
+  }
+
+  // Drag the yellow rotate handle around the parcel → rotate the lot
+  function handleParcelRotateStart(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    capturePointer(e);
+    const pt = getSvgPoint(e, svgRef.current);
+    const parcelCx = SVG_W / 2 + satShift.x;
+    const parcelCy = SVG_H / 2 + satShift.y;
+    dragRef.current = {
+      mode: 'rotate-parcel',
+      cx: parcelCx, cy: parcelCy,
+      startPointerAngle: Math.atan2(pt.y - parcelCy, pt.x - parcelCx) * 180 / Math.PI,
+      startYaw: satYaw,
+    };
+    setActiveMode('rotate-parcel');
   }
 
   function clampRotated(xPx, yPx, sw, sh, angleDeg) {
@@ -534,7 +871,28 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
       return;
     }
 
+    if (d.mode === 'pan-parcel') {
+      setSatShift({ x: d.startShift.x + (pt.x - d.startSX),
+                    y: d.startShift.y + (pt.y - d.startSY) });
+      return;
+    }
+
+    if (d.mode === 'rotate-parcel') {
+      const currentAngle = Math.atan2(pt.y - d.cy, pt.x - d.cx) * 180 / Math.PI;
+      setSatYaw(d.startYaw + (currentAngle - d.startPointerAngle));
+      return;
+    }
+
     const plan = invProj(pt.x, pt.y, v);
+
+    // Polygon-containment check: reject any move whose rotated footprint
+    // would put a corner outside the setback inset (or the parcel itself
+    // when no inset is available — e.g. zero setbacks or degenerate input).
+    const constraintPolygon = _insetPlanForClamp?.length
+      ? _insetPlanForClamp
+      : _ringPlanForClamp
+        ? _ringPlanForClamp.map(([x, y]) => ({ x, y }))
+        : null;
 
     if (d.mode === 'drag') {
       const pl  = placements[d.idx];
@@ -545,6 +903,11 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
         plan.x - buildX - d.offsetX, plan.y - buildY - d.offsetY,
         sw, sh, rot
       );
+      // Polygon containment — corners must all be inside the buildable polygon
+      if (constraintPolygon &&
+          !rectangleInsidePolygon(buildX + nx, buildY + ny, sw, sh, rot, constraintPolygon)) {
+        return;
+      }
       setPosFt((prev) => {
         const next = [...prev];
         next[d.idx] = { xFt: nx / scale, yFt: ny / scale };
@@ -560,6 +923,10 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
       const { xPx: nx, yPx: ny } = clampRotated(
         pos.xFt * scale, pos.yFt * scale, sw, sh, angle
       );
+      if (constraintPolygon &&
+          !rectangleInsidePolygon(buildX + nx, buildY + ny, sw, sh, angle, constraintPolygon)) {
+        return;
+      }
       setRotations((prev) => {
         const next = [...prev];
         next[d.idx] = angle;
@@ -629,7 +996,9 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
   const coveragePct = ((covered / parcel.sqft) * 100).toFixed(1);
   const totalUnits  = placements.reduce((s, p) => s + (productMap[p.productId]?.units ?? 1), 0);
 
-  const trees = (() => {
+  // Real-lot (satellite) mode shows actual trees from the imagery, so skip
+  // the decorative stand-in trees used in the stylized views.
+  const trees = viewMode === 'satellite' ? [] : (() => {
     const rng = seededRng(42);
     const list = [];
     const margin = 6;
@@ -669,13 +1038,32 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
     }
   }
 
-  const parcelScreen = parcelCornersPlan.map(([x, y]) => proj(x, y, 0, v));
-  const setbackRects = [
-    [[0, 0], [pW, 0], [pW, sbRear], [0, sbRear]],
-    [[0, pH - sbFront], [pW, pH - sbFront], [pW, pH], [0, pH]],
-    [[0, sbRear], [sbSide, sbRear], [sbSide, pH - sbFront], [0, pH - sbFront]],
-    [[pW - sbSide, sbRear], [pW, sbRear], [pW, pH - sbFront], [pW - sbSide, pH - sbFront]],
-  ].map(poly => poly.map(([x, y]) => proj(x, y, 0, v)));
+  // Real parcel polygon (if Regrid supplied one), otherwise the bbox rectangle.
+  // The ring + inset were already computed above for drag-clamping; reuse them.
+  const ringPlan       = _ringPlanForClamp;
+  const insetPlan      = _insetPlanForClamp;
+  const hasRealPolygon = Array.isArray(ringPlan) && ringPlan.length >= 3;
+  const parcelShapePlan   = hasRealPolygon ? ringPlan : parcelCornersPlan;
+  const parcelShapeScreen = parcelShapePlan.map(([x, y]) => proj(x, y, 0, v));
+  const parcelScreen      = parcelShapeScreen; // kept for backward-compat naming
+
+  // Setback zones
+  //   Rectangle parcel → the existing N/S/E/W pattern-filled strips
+  //   Polygon parcel   → true polygon inset; band = polygon minus inset
+  let setbackRects = [];
+  let polygonInsetScreen = null;
+  let polygonSetbackBandPath = null;
+  if (hasRealPolygon && insetPlan) {
+    polygonInsetScreen = insetPlan.map(p => proj(p.x, p.y, 0, v));
+    polygonSetbackBandPath = outerMinusInnerPath(parcelShapeScreen, polygonInsetScreen);
+  } else if (!hasRealPolygon) {
+    setbackRects = [
+      [[0, 0], [pW, 0], [pW, sbRear], [0, sbRear]],
+      [[0, pH - sbFront], [pW, pH - sbFront], [pW, pH], [0, pH]],
+      [[0, sbRear], [sbSide, sbRear], [sbSide, pH - sbFront], [0, pH - sbFront]],
+      [[pW - sbSide, sbRear], [pW, sbRear], [pW, pH - sbFront], [pW - sbSide, pH - sbFront]],
+    ].map(poly => poly.map(([x, y]) => proj(x, y, 0, v)));
+  }
 
   const buildCornersScreen = [
     [buildX, buildY], [buildX + buildW, buildY],
@@ -684,6 +1072,23 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
 
   // Ground texture matrix: maps (plan x, y) to screen — for SVG patternTransform
   const groundMatrix = `matrix(${cosA}, ${sinA * sinP}, ${-sinA}, ${cosA * sinP}, 0, 0)`;
+
+  // ─── Satellite image URL (Esri World Imagery, free/no-key) ───────
+  // Build a bbox in lat/lng whose on-ground extent matches the SVG viewBox
+  // at the current plan-pixel scale, centred on the geocoded point.
+  const satelliteUrl = viewMode === 'satellite' && geo ? (() => {
+    const ftPerDegLat = 364000;
+    const ftPerDegLng = 364000 * Math.cos(geo.lat * Math.PI / 180);
+    const bboxWFt = SVG_W / scale;
+    const bboxHFt = SVG_H / scale;
+    const halfW = bboxWFt / 2 / ftPerDegLng;
+    const halfH = bboxHFt / 2 / ftPerDegLat;
+    const minLng = geo.lng - halfW;
+    const maxLng = geo.lng + halfW;
+    const minLat = geo.lat - halfH;
+    const maxLat = geo.lat + halfH;
+    return `https://services.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/export?bbox=${minLng},${minLat},${maxLng},${maxLat}&bboxSR=4326&size=${SVG_W},${SVG_H}&format=png&f=image`;
+  })() : null;
 
   // Compass: point arrow toward world +y = -cosA*sinP on screen (flipped to show screen north as "up")
   // "North" = plan -y direction → screen (sinA, -cosA*sinP). Angle (clockwise from +x):
@@ -696,14 +1101,56 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
   return (
     <div className="birds-eye-wrap">
       <div className="birds-eye-tabs" role="tablist" aria-label="View mode">
-        <button type="button" role="tab" aria-selected={viewMode === '3d'}
-          className={viewMode === '3d' ? 'active' : ''}
-          onClick={() => setViewMode('3d')}>3D view</button>
         <button type="button" role="tab" aria-selected={viewMode === '2d'}
           className={viewMode === '2d' ? 'active' : ''}
           onClick={() => setViewMode('2d')}>2D view</button>
+        <button type="button" role="tab" aria-selected={viewMode === 'realistic'}
+          className={viewMode === 'realistic' ? 'active' : ''}
+          onClick={() => setViewMode('realistic')}>3D view v1</button>
+        <button type="button" role="tab" aria-selected={viewMode === 'satellite'}
+          className={viewMode === 'satellite' ? 'active' : ''}
+          onClick={() => setViewMode('satellite')}>Real lot</button>
+        <button type="button" role="tab" aria-selected={viewMode === 'cesium'}
+          className={viewMode === 'cesium' ? 'active' : ''}
+          onClick={() => setViewMode('cesium')}>3D Globe</button>
       </div>
-      <svg
+
+      {viewMode === 'cesium' && (
+        <CesiumView parcel={parcel} placements={placements} products={products} setbacks={setbacks} />
+      )}
+
+      {viewMode === 'satellite' && (
+        <div className="birds-eye-address-bar">
+          <input type="text" placeholder="Enter address (e.g. 1600 Pennsylvania Ave NW, Washington DC)"
+            value={address}
+            onChange={(e) => setAddress(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') loadSatellite(); }} />
+          <button type="button" onClick={loadSatellite}
+            disabled={satLoading || !address.trim()}>
+            {satLoading ? 'Loading…' : 'Find lot'}
+          </button>
+          {satError && <span className="bev-address-error">{satError}</span>}
+          {geo && !satError && (
+            <>
+              <span className="bev-address-pin">📍 {geo.displayName}</span>
+              {(satShift.x !== 0 || satShift.y !== 0 || satYaw !== 0) && (
+                <button type="button" onClick={resetAlignment}
+                  className="bev-reset-align">Reset alignment</button>
+              )}
+            </>
+          )}
+        </div>
+      )}
+      {viewMode === 'satellite' && geo && (
+        <div className="bev-align-hint">
+          {osmBuildings.length > 0
+            ? <>Cyan outlines are OSM building footprints · lot auto-centered on the nearest one.{' '}</>
+            : <>Drag the lot to pan · drag the yellow handle to rotate.{' '}</>
+          }
+          {satYaw !== 0 && <strong>({Math.round(((satYaw % 360) + 360) % 360)}°)</strong>}
+        </div>
+      )}
+      {viewMode !== 'cesium' && <svg
         ref={svgRef}
         viewBox={`0 0 ${SVG_W} ${SVG_H}`}
         className="birds-eye-svg"
@@ -711,7 +1158,10 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
         style={{ cursor: activeMode === 'drag' ? 'grabbing'
                        : activeMode === 'rotate' ? 'crosshair'
                        : activeMode === 'camera' ? 'grabbing'
-                       : viewMode === '3d' ? 'grab'
+                       : activeMode === 'pan-parcel' ? 'grabbing'
+                       : activeMode === 'rotate-parcel' ? 'crosshair'
+                       : (viewMode === 'satellite' && geo) ? 'grab'
+                       : !isFlatView ? 'grab'
                        : 'default', touchAction: 'none' }}
         onPointerDown={handleCameraStart}
         onPointerMove={handleMouseMove}
@@ -735,22 +1185,110 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
             <rect x="0" y="0" width="10" height="10" fill="rgba(0,0,0,0.03)" />
             <rect x="10" y="10" width="10" height="10" fill="rgba(0,0,0,0.03)" />
           </pattern>
+
+          {/* Realistic-mode assets */}
+          <linearGradient id="sky-bg-grad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%"  stopColor="#b4d2e2" />
+            <stop offset="55%" stopColor="#e5dcc4" />
+            <stop offset="100%" stopColor="#b8ab8e" />
+          </linearGradient>
+          <linearGradient id="window-grad" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">
+            <stop offset="0%"   stopColor="#2c4560" />
+            <stop offset="55%"  stopColor="#a4c2d8" />
+            <stop offset="100%" stopColor="#e3ebf0" />
+          </linearGradient>
+          <linearGradient id="door-grad" x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">
+            <stop offset="0%"   stopColor="#1a0f07" />
+            <stop offset="100%" stopColor="#4a3322" />
+          </linearGradient>
+          {COLORS.map((c, i) => (
+            <linearGradient key={`rg-${i}`} id={`roof-grad-${i}`}
+              x1="0" y1="0" x2="0" y2="1" gradientUnits="objectBoundingBox">
+              <stop offset="0%"   stopColor={c.accent} />
+              <stop offset="100%" stopColor={c.stroke} />
+            </linearGradient>
+          ))}
+          <filter id="soft-shadow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="2" />
+          </filter>
         </defs>
 
-        <rect x={0} y={0} width={SVG_W} height={SVG_H} fill="url(#pave-pat)" />
-        <polygon points={pts(parcelScreen)} fill="url(#grass-pat)" stroke="#1a3a20" strokeWidth="1.5" />
+        {viewMode === 'satellite' && satelliteUrl ? (
+          <image href={satelliteUrl} x={0} y={0} width={SVG_W} height={SVG_H} preserveAspectRatio="none" />
+        ) : viewMode === 'satellite' ? (
+          <rect x={0} y={0} width={SVG_W} height={SVG_H} fill="#1f2937" />
+        ) : (
+          <rect x={0} y={0} width={SVG_W} height={SVG_H}
+            fill={realistic ? 'url(#sky-bg-grad)' : 'url(#pave-pat)'} />
+        )}
+
+        {/* OSM building footprints overlaid on the satellite — anchored to the
+            image's lat/lng bbox (independent of the user's lot alignment). */}
+        {viewMode === 'satellite' && geo && osmBuildings.length > 0 && (() => {
+          const ftPerDegLat = 364000;
+          const ftPerDegLng = 364000 * Math.cos(geo.lat * Math.PI / 180);
+          return (
+            <g style={{ pointerEvents: 'none' }}>
+              {osmBuildings.map((poly, i) => {
+                const pointsStr = poly.map(p => {
+                  const sx = SVG_W / 2 + (p.lon - geo.lng) * ftPerDegLng * scale;
+                  const sy = SVG_H / 2 - (p.lat - geo.lat) * ftPerDegLat * scale;
+                  return `${sx.toFixed(2)},${sy.toFixed(2)}`;
+                }).join(' ');
+                return (
+                  <polygon key={i} points={pointsStr}
+                    fill="rgba(34, 211, 238, 0.18)"
+                    stroke="#22d3ee" strokeWidth="1.5"
+                    strokeLinejoin="round" />
+                );
+              })}
+            </g>
+          );
+        })()}
+        <polygon points={pts(parcelScreen)}
+          fill={viewMode === 'satellite' ? 'rgba(120, 200, 80, 0.12)' : 'url(#grass-pat)'}
+          stroke={viewMode === 'satellite' ? '#ffde4d' : '#1a3a20'}
+          strokeWidth={viewMode === 'satellite' ? 2 : 1.5} />
 
         {setbackRects.map((poly, i) => (
-          <polygon key={i} points={pts(poly)} fill="url(#setback-pat)" opacity="0.7" />
+          <polygon key={i} points={pts(poly)}
+            fill={viewMode === 'satellite' ? 'rgba(255, 255, 255, 0.08)' : 'url(#setback-pat)'}
+            opacity={viewMode === 'satellite' ? 1 : 0.7} />
         ))}
 
-        <polygon points={pts(buildCornersScreen)} fill="none"
-          stroke="rgba(255,255,255,0.35)" strokeWidth="1" strokeDasharray="5 3" />
+        {polygonSetbackBandPath && (
+          <path d={polygonSetbackBandPath} fillRule="evenodd"
+            fill={viewMode === 'satellite' ? 'rgba(255, 255, 255, 0.08)' : 'url(#setback-pat)'}
+            opacity={viewMode === 'satellite' ? 1 : 0.7} />
+        )}
+
+        {/* Auto setback line — dashed amber outline marking the buildable
+            envelope (polygon inset for polygon parcels, bbox-minus-setbacks
+            rectangle for non-polygon parcels). Distinct from the green
+            setback band fill so the boundary reads even when the fill is
+            obscured by buildings or trees. */}
+        <polygon
+          points={pts(polygonInsetScreen ?? buildCornersScreen)}
+          fill="none"
+          stroke="#f59e0b"
+          strokeWidth="1.6"
+          strokeDasharray="6 4"
+          style={{ pointerEvents: 'none' }}
+        />
+        <polygon
+          points={pts(polygonInsetScreen ?? buildCornersScreen)}
+          fill="none"
+          stroke="rgba(0,0,0,0.35)"
+          strokeWidth="0.7"
+          strokeDasharray="6 4"
+          strokeDashoffset="3"
+          style={{ pointerEvents: 'none' }}
+        />
 
         {sceneItems.map((item) => {
           if (item.type === 'tree') {
             return <Tree key={`t-${item.idx}`} xPx={item.tree.x} yPx={item.tree.y} r={item.tree.r}
-              v={v} scale={scale} />;
+              v={v} scale={scale} realistic={realistic} />;
           }
           const i = item.idx;
           const pl = placements[i];
@@ -761,6 +1299,8 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
               stories={prod?.stories ?? 1}
               units={prod?.units ?? 1}
               color={colorMap[pl.productId] ?? COLORS[0]}
+              colorIdx={colorIdxMap[pl.productId] ?? 0}
+              realistic={realistic}
               scale={scale}
               xPx={buildX + pos.xFt * scale}
               yPx={buildY + pos.yFt * scale}
@@ -799,12 +1339,37 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
             );
           }).filter(Boolean);
 
+          // Cast a ray from the midpoint of each building-bbox side toward
+          // the nearest parcel polygon edge. Falls back to the rectangular
+          // buildable bbox when no polygon is available.
+          const parcelPoly = _ringPlanForClamp
+            ? _ringPlanForClamp.map(([x, y]) => ({ x, y }))
+            : null;
+          const midX = bb.x + bb.w / 2;
+          const midY = bb.y + bb.h / 2;
+
           function nearest(side) {
             let edge;
-            if (side === 'left')   edge = buildX;
-            if (side === 'right')  edge = buildX + buildW;
-            if (side === 'top')    edge = buildY;
-            if (side === 'bottom') edge = buildY + buildH;
+            if (parcelPoly) {
+              if (side === 'left') {
+                const t = rayToPolygonDistance(bb.x, midY, -1, 0, parcelPoly);
+                edge = Number.isFinite(t) ? bb.x - t : buildX;
+              } else if (side === 'right') {
+                const t = rayToPolygonDistance(bb.x + bb.w, midY, 1, 0, parcelPoly);
+                edge = Number.isFinite(t) ? bb.x + bb.w + t : buildX + buildW;
+              } else if (side === 'top') {
+                const t = rayToPolygonDistance(midX, bb.y, 0, -1, parcelPoly);
+                edge = Number.isFinite(t) ? bb.y - t : buildY;
+              } else {
+                const t = rayToPolygonDistance(midX, bb.y + bb.h, 0, 1, parcelPoly);
+                edge = Number.isFinite(t) ? bb.y + bb.h + t : buildY + buildH;
+              }
+            } else {
+              if (side === 'left')   edge = buildX;
+              if (side === 'right')  edge = buildX + buildW;
+              if (side === 'top')    edge = buildY;
+              if (side === 'bottom') edge = buildY + buildH;
+            }
             for (const o of others) {
               if (side === 'left' || side === 'right') {
                 const vOverlap = Math.max(bb.y, o.y) < Math.min(bb.y + bb.h, o.y + o.h);
@@ -898,8 +1463,8 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
           </g>
         </g>
 
-        {/* Orbit hint / view buttons (3D only) */}
-        {viewMode === '3d' && (
+        {/* Orbit hint / view buttons (any 3D-projection mode) */}
+        {!isFlatView && (
           <g transform={`translate(${LABEL_PAD - 4}, ${SVG_H - LABEL_PAD / 2 + 4})`} style={{ pointerEvents: 'all' }}>
             <g onClick={resetView} style={{ cursor: 'pointer' }}>
               <rect x="0" y="-11" width="58" height="18" rx="9" fill="rgba(15,23,42,0.8)" />
@@ -914,7 +1479,39 @@ export default function BirdsEyeSVG({ parcel, setbacks, placements = [], product
             </text>
           </g>
         )}
-      </svg>
+
+        {viewMode === 'satellite' && satelliteUrl && (
+          <text x={SVG_W - 6} y={SVG_H - 5} textAnchor="end" fontSize="7.5"
+            fill="rgba(255,255,255,0.9)"
+            style={{ pointerEvents: 'none', textShadow: '0 0 2px rgba(0,0,0,0.95)' }}>
+            Imagery © Esri · Geocoding © OpenStreetMap
+          </text>
+        )}
+
+        {/* Parcel rotate handle — satellite alignment */}
+        {viewMode === 'satellite' && geo && (() => {
+          const handleOffsetFt = Math.max(18, parcel.depth * 0.1);
+          const handlePos   = proj(pW / 2, -handleOffsetFt * scale, 0, v);
+          const parcelTopMid = proj(pW / 2, 0, 0, v);
+          const active = activeMode === 'rotate-parcel';
+          return (
+            <g onPointerDown={handleParcelRotateStart}
+              style={{ cursor: 'grab', touchAction: 'none' }}>
+              {/* Enlarged hit target for touch */}
+              <circle cx={handlePos.x} cy={handlePos.y} r="22" fill="transparent" />
+              <line x1={parcelTopMid.x} y1={parcelTopMid.y} x2={handlePos.x} y2={handlePos.y}
+                stroke="#ffde4d" strokeWidth="1.5" strokeDasharray="3 3" />
+              <circle cx={handlePos.x} cy={handlePos.y} r="11"
+                fill={active ? '#1d2cf3' : '#ffde4d'}
+                stroke="#0f172a" strokeWidth="1.6" />
+              <text x={handlePos.x} y={handlePos.y + 4} textAnchor="middle"
+                fontSize="13" fontWeight="700"
+                fill={active ? '#ffffff' : '#0f172a'}
+                style={{ pointerEvents: 'none' }}>↻</text>
+            </g>
+          );
+        })()}
+      </svg>}
 
       {hasViolation && (
         <div className="birds-eye-warning">

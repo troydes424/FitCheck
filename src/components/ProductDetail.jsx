@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import BirdsEyeSVG from './BirdsEyeSVG';
+import PriceBreakdown from './PriceBreakdown';
 import { generateLayout } from '../utils/generateLayout';
 
 function parseMoney(str) {
@@ -48,11 +49,8 @@ export default function ProductDetail({ product: p, parcel, setbacks, apiKey, ma
   const placedCount = layout?.placements?.length ?? 0;
   const unmet       = !layoutLoading && p.requestedCount && placedCount < p.requestedCount;
   const price       = parseMoney(p.priceRange);
-  const totalMin    = price && !layoutLoading ? fmtMoney(price.min * placedCount) : null;
-  const totalMax    = price && !layoutLoading ? fmtMoney(price.max * placedCount) : null;
-  const totalPrice  = totalMin && totalMax
-    ? (totalMin === totalMax ? totalMin : `${totalMin} – ${totalMax}`)
-    : null;
+  const totalMinNum = price && !layoutLoading ? price.min * placedCount : null;
+  const totalMaxNum = price && !layoutLoading ? price.max * placedCount : null;
 
   return (
     <div className="product-detail">
@@ -103,7 +101,13 @@ export default function ProductDetail({ product: p, parcel, setbacks, apiKey, ma
             <span />
             <span className="mpt-cell mpt-total-val">{layoutLoading ? '…' : placedCount}</span>
             <span className="mpt-cell mpt-accent mpt-total-val">{layoutLoading ? '…' : placedCount * p.units}</span>
-            <span className="mpt-cell mpt-total-val">{layoutLoading ? '…' : (totalPrice ? `${totalPrice} (total)` : '—')}</span>
+            <span className="mpt-cell mpt-total-val">
+              {layoutLoading
+                ? '…'
+                : (Number.isFinite(totalMinNum) && Number.isFinite(totalMaxNum)
+                    ? <PriceBreakdown totalMin={totalMinNum} totalMax={totalMaxNum} />
+                    : '—')}
+            </span>
           </div>
         </div>
       </div>

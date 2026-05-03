@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 import BirdsEyeSVG from './BirdsEyeSVG';
+import PriceBreakdown from './PriceBreakdown';
 import { generateLayout } from '../utils/generateLayout';
 
 function parseMoney(str) {
@@ -118,11 +119,14 @@ export default function MultiLayoutView({ products, parcel, setbacks, apiKey, ma
                 products.forEach((p) => {
                   const count = countById[p.id] ?? 0;
                   const price = parseMoney(p.priceRange);
-                  if (price && count > 0) { totalMin += price.min * count; totalMax += price.max * count; hasPrice = true; }
+                  if (price && count > 0) {
+                    totalMin += price.min * count;
+                    totalMax += price.max * count;
+                    hasPrice = true;
+                  }
                 });
                 if (!hasPrice) return '—';
-                const val = totalMin === totalMax ? fmtMoney(totalMin) : `${fmtMoney(totalMin)} – ${fmtMoney(totalMax)}`;
-                return `${val} (total)`;
+                return <PriceBreakdown totalMin={totalMin} totalMax={totalMax} />;
               })()}
             </span>
           </div>

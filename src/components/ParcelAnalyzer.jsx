@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import ProductDetail from './ProductDetail';
 import MultiLayoutView from './MultiLayoutView';
+import { lookupParcelByAddress, hasRegridToken } from '../utils/regrid';
 
 const VOLUMOD_PRODUCTS = [
   {
@@ -170,20 +171,6 @@ const VOLUMOD_PRODUCTS = [
   },
 ];
 
-const STATE_ENDPOINTS = {
-  '18': {
-    name: 'Indiana',
-    url: 'https://gisdata.in.gov/server/rest/services/Hosted/Parcel_Boundaries_of_Indiana_Current/FeatureServer/0/query',
-    mapFields: (attrs) => ({
-      parcelId: attrs.parcel_id || attrs.state_parcel_id || null,
-      county: attrs.tax_county || null,
-      displayAddress: [attrs.prop_add, attrs.prop_city, attrs.prop_state]
-        .filter(Boolean)
-        .join(', '),
-    }),
-  },
-};
-
 const DEFAULT_SETBACKS  = { front: 20, rear: 15, side: 5 };
 const MAX_LOT_COVERAGE  = 0.5;
 const API_KEY_STORAGE     = 'vol-claude-api-key';
@@ -209,10 +196,14 @@ function ringToFeetPoints(ring) {
   return ring.map((_, i) => ({ x: xs[i] - minX, y: maxY - ys[i] }));
 }
 
-function getOuterRing(geometry) {
-  if (geometry?.rings?.length > 0) return geometry.rings[0];
-  return null;
+function formatMoney(n) {
+  if (n == null || !Number.isFinite(n)) return '';
+  const abs = Math.abs(n);
+  if (abs >= 1_000_000) return `$${(n / 1_000_000).toFixed(abs >= 10_000_000 ? 1 : 2)}M`;
+  if (abs >= 1_000)     return `$${Math.round(n).toLocaleString()}`;
+  return `$${n.toFixed(0)}`;
 }
+
 
 function parcelDimensions(ring) {
   const lons   = ring.map((c) => c[0]);
@@ -263,8 +254,7 @@ function analyzeFit(parcel, setbacks, products) {
 // ── Loading step labels ───────────────────────────────────────────────────────
 
 const LOADING_LABELS = {
-  geocoding: 'Step 1 of 2 — Geocoding address…',
-  parcel:    'Step 2 of 2 — Fetching parcel from Indiana GIS…',
+  parcel: 'Fetching parcel from Regrid…',
 };
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -369,68 +359,20 @@ export default function ParcelAnalyzer({ products = VOLUMOD_PRODUCTS, wizardStep
       return;
     }
 
+    if (!hasRegridToken()) {
+      setError('Regrid API token missing. Add VITE_REGRID_TOKEN to your .env and restart the dev server.');
+      return;
+    }
+
     try {
-      setLoadingStep('geocoding');
-      const censusParams = new URLSearchParams({
-        address,
-        benchmark: 'Public_AR_Current',
-        format: 'json',
-      });
-      const censusRes = await fetch(`https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?${censusParams}`);
-      if (!censusRes.ok) throw new Error(`Census geocoder error ${censusRes.status}`);
-      const censusData = await censusRes.json();
-
-      const match = censusData?.result?.addressMatches?.[0];
-      if (!match) throw new Error('Address not recognised. Try including city and state (e.g. "123 Main St, Indianapolis, IN").');
-
-      const { x: lon, y: lat } = match.coordinates;
-      const endpoint = STATE_ENDPOINTS['18'];
-
       setLoadingStep('parcel');
-      const arcParams = new URLSearchParams({
-        where: '1=1',
-        geometry: `${lon},${lat}`,
-        geometryType: 'esriGeometryPoint',
-        inSR: '4326',
-        spatialRel: 'esriSpatialRelIntersects',
-        outFields: '*',
-        returnGeometry: 'true',
-        f: 'json',
-      });
-      const arcRes = await fetch(`${endpoint.url}?${arcParams}`);
-      if (!arcRes.ok) throw new Error(`Indiana GIS error ${arcRes.status}`);
-      const arcData = await arcRes.json();
-
-      if (arcData?.error) throw new Error(`Indiana GIS: ${arcData.error.message} (code ${arcData.error.code})`);
-      const features = arcData?.features ?? [];
-      if (features.length === 0) throw new Error('No parcel found. Confirm the address is in Indiana — other states are not yet supported.');
-
-      const feature      = features[0];
-      const mappedFields = endpoint.mapFields(feature.attributes ?? {});
-      const ring         = getOuterRing(feature.geometry);
-      if (!ring) throw new Error('Parcel geometry could not be parsed.');
-
-      const { sqft, frontage, depth } = parcelDimensions(ring);
-      const parcelData = {
-        displayAddress: mappedFields.displayAddress || match.matchedAddress || address,
-        matchedAddress: match.matchedAddress,
-        parcelId: mappedFields.parcelId,
-        county:   mappedFields.county,
-        state:    endpoint.name,
-        sqft:      Math.round(sqft),
-        frontage:  Math.round(frontage),
-        depth:     Math.round(depth),
-        acres:     sqft / 43560,
-        centerLon: lon,
-        centerLat: lat,
-        ring,
-      };
+      const parcelData = await lookupParcelByAddress(address.trim());
 
       setParcel(parcelData);
       setResults(analyzeFit(parcelData, setbacks, products));
       setWizardStep(2);
     } catch (err) {
-      setError(err.message);
+      setError(err.message || 'Parcel lookup failed.');
     } finally {
       setLoadingStep(null);
     }
@@ -640,11 +582,116 @@ export default function ParcelAnalyzer({ products = VOLUMOD_PRODUCTS, wizardStep
                 {parcel.county && (
                   <div className="stat-item">
                     <span className="stat-label">County</span>
-                    <strong className="stat-value">{parcel.county}, {parcel.state}</strong>
+                    <strong className="stat-value">{parcel.county}{parcel.state ? `, ${parcel.state}` : ''}</strong>
                   </div>
                 )}
+                {parcel.owner && (
+                  <div className="stat-item">
+                    <span className="stat-label">Owner</span>
+                    <strong className="stat-value">
+                      {parcel.owner}
+                      {parcel.owner2 ? ` · ${parcel.owner2}` : ''}
+                      {parcel.ownerOccupied ? ' (owner-occupied)' : ''}
+                    </strong>
+                  </div>
+                )}
+                {parcel.ownerAddress && (
+                  <div className="stat-item">
+                    <span className="stat-label">Owner mailing</span>
+                    <strong className="stat-value">{parcel.ownerAddress}</strong>
+                  </div>
+                )}
+                {(parcel.zoning || parcel.zoningDesc) && (
+                  <div className="stat-item">
+                    <span className="stat-label">Zoning</span>
+                    <strong className="stat-value">
+                      {parcel.zoning || ''}
+                      {parcel.zoning && parcel.zoningDesc ? ' — ' : ''}
+                      {parcel.zoningDesc || ''}
+                    </strong>
+                  </div>
+                )}
+                {(parcel.usedesc || parcel.lbcsFunction) && (
+                  <div className="stat-item">
+                    <span className="stat-label">Land use</span>
+                    <strong className="stat-value">{parcel.usedesc || parcel.lbcsFunction}</strong>
+                  </div>
+                )}
+                {parcel.yearBuilt && (
+                  <div className="stat-item">
+                    <span className="stat-label">Year built</span>
+                    <strong className="stat-value">
+                      {parcel.yearBuilt}
+                      {parcel.struct ? ` · ${parcel.struct}` : ''}
+                      {parcel.stories ? ` · ${parcel.stories}-story` : ''}
+                    </strong>
+                  </div>
+                )}
+                {parcel.buildingSqft && (
+                  <div className="stat-item">
+                    <span className="stat-label">Existing building</span>
+                    <strong className="stat-value">
+                      {parcel.buildingSqft.toLocaleString()} sq ft
+                      {parcel.numUnits ? ` · ${parcel.numUnits} unit${parcel.numUnits > 1 ? 's' : ''}` : ''}
+                    </strong>
+                  </div>
+                )}
+                {parcel.totalValue != null && (
+                  <div className="stat-item">
+                    <span className="stat-label">
+                      Assessed value{parcel.taxYear ? ` (${parcel.taxYear})` : ''}
+                    </span>
+                    <strong className="stat-value">
+                      {formatMoney(parcel.totalValue)}
+                      {parcel.landValue != null && parcel.improvValue != null && (
+                        <span className="stat-sub">
+                          {' '}· land {formatMoney(parcel.landValue)} + improvements {formatMoney(parcel.improvValue)}
+                        </span>
+                      )}
+                    </strong>
+                  </div>
+                )}
+                {parcel.taxAmount != null && (
+                  <div className="stat-item">
+                    <span className="stat-label">Property tax{parcel.taxYear ? ` (${parcel.taxYear})` : ''}</span>
+                    <strong className="stat-value">{formatMoney(parcel.taxAmount)}/yr</strong>
+                  </div>
+                )}
+                {parcel.saleDate && (
+                  <div className="stat-item">
+                    <span className="stat-label">Last sale</span>
+                    <strong className="stat-value">
+                      {parcel.saleDate}
+                      {parcel.salePrice != null ? ` · ${formatMoney(parcel.salePrice)}` : ''}
+                    </strong>
+                  </div>
+                )}
+                {parcel.schoolDistrict && (
+                  <div className="stat-item">
+                    <span className="stat-label">School district</span>
+                    <strong className="stat-value">{parcel.schoolDistrict}</strong>
+                  </div>
+                )}
+                {parcel.subdivision && (
+                  <div className="stat-item">
+                    <span className="stat-label">Subdivision</span>
+                    <strong className="stat-value">{parcel.subdivision}</strong>
+                  </div>
+                )}
+                {parcel.femaFloodZone && (
+                  <div className="stat-item">
+                    <span className="stat-label">FEMA flood zone</span>
+                    <strong className="stat-value">{parcel.femaFloodZone}</strong>
+                  </div>
+                )}
+                {parcel.legalDesc && (
+                  <details className="stat-item stat-item-full">
+                    <summary className="stat-label">Legal description</summary>
+                    <strong className="stat-value stat-value-long">{parcel.legalDesc}</strong>
+                  </details>
+                )}
                 <p className="stat-note">
-                  Dimensions estimated from GIS bounding box. Check local municipality for zoning.
+                  Parcel data from Regrid. Zoning & land-use codes reflect current records; verify with local municipality before building.
                 </p>
               </div>
             </div>

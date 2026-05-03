@@ -1,3 +1,11 @@
+// Optional `modelUrl` field per product — a GLB/GLTF asset rendered in the
+// Cesium 3D Globe view in place of the default cream-walls-plus-roof box.
+//   • Author the GLB at real-world scale: 1 unit = 1 metre, Y-up.
+//   • The origin should sit at the ground centre of the footprint (x-z
+//     plane), so the model's base lines up with the parcel surface.
+//   • Host the file in /public/models/ and reference it as
+//     '/models/<filename>.glb', or paste any CDN/HTTPS URL.
+// Leave modelUrl empty to keep rendering the built-in cream-box building.
 export const DEFAULT_PRODUCTS = [
   {
     id: 'juniper',
@@ -13,6 +21,7 @@ export const DEFAULT_PRODUCTS = [
     image: 'https://static.wixstatic.com/media/9b04fd_3cb78230e6644c86ad161b812c465f3b~mv2.jpg',
     priceRange: '$250K – $350K',
     completionTime: '4 – 6 months',
+    modelUrl: '',
   },
   {
     id: 'ivy',
@@ -28,6 +37,7 @@ export const DEFAULT_PRODUCTS = [
     image: 'https://static.wixstatic.com/media/9b04fd_dbbe8d6f6dda484bb907eacc0767d483~mv2.jpg',
     priceRange: '$380K – $480K',
     completionTime: '4 – 6 months',
+    modelUrl: '',
   },
   {
     id: 'cottonwood',
@@ -43,6 +53,7 @@ export const DEFAULT_PRODUCTS = [
     image: 'https://static.wixstatic.com/media/9b04fd_bdfb01a5fd1a45d5b29250fd79acd5c4~mv2.jpg',
     priceRange: '$320K – $420K',
     completionTime: '5 – 7 months',
+    modelUrl: '',
   },
   {
     id: 'jasmine',
@@ -58,6 +69,7 @@ export const DEFAULT_PRODUCTS = [
     image: 'https://static.wixstatic.com/media/9b04fd_6bbae63961df4607bd94595da2930666~mv2.jpg',
     priceRange: '$450K – $600K',
     completionTime: '5 – 7 months',
+    modelUrl: '',
   },
   {
     id: 'alder',
@@ -73,6 +85,7 @@ export const DEFAULT_PRODUCTS = [
     image: 'https://static.wixstatic.com/media/9b04fd_d3acad6f605e40cda1b89abd7446dd9e~mv2.png',
     priceRange: '$420K – $540K',
     completionTime: '4 – 6 months',
+    modelUrl: '',
   },
   {
     id: 'sycamore',
@@ -88,6 +101,7 @@ export const DEFAULT_PRODUCTS = [
     image: 'https://static.wixstatic.com/media/9b04fd_912356589917495289f6fb1f0a90304b~mv2.jpg',
     priceRange: '$620K – $800K',
     completionTime: '5 – 7 months',
+    modelUrl: '',
   },
   {
     id: 'maple',
@@ -103,6 +117,7 @@ export const DEFAULT_PRODUCTS = [
     image: 'https://static.wixstatic.com/media/9b04fd_d580cfec549e437f8a5ade0f1c5766b2~mv2.jpg',
     priceRange: '$900K – $1.2M',
     completionTime: '6 – 9 months',
+    modelUrl: '',
   },
   {
     id: 'cypress',
@@ -118,6 +133,7 @@ export const DEFAULT_PRODUCTS = [
     image: 'https://static.wixstatic.com/media/9b04fd_6e5c482ad2d94afd80caac273fd32ed0~mv2.jpg',
     priceRange: '$1.8M – $2.5M',
     completionTime: '8 – 11 months',
+    modelUrl: '',
   },
   {
     id: 'willow',
@@ -133,6 +149,7 @@ export const DEFAULT_PRODUCTS = [
     image: 'https://static.wixstatic.com/media/9b04fd_4ea00f86e0b443c38d59a39f65adf8ed~mv2.jpg',
     priceRange: '$1.4M – $1.9M',
     completionTime: '7 – 10 months',
+    modelUrl: '',
   },
   {
     id: 'rosewood',
@@ -148,6 +165,7 @@ export const DEFAULT_PRODUCTS = [
     image: 'https://static.wixstatic.com/media/9b04fd_473979b756ba461ba692ee6e481d309c~mv2.jpg',
     priceRange: '$6.5M – $9M',
     completionTime: '12 – 18 months',
+    modelUrl: '',
   },
   {
     id: 'mulberry',
@@ -163,5 +181,6 @@ export const DEFAULT_PRODUCTS = [
     image: 'https://static.wixstatic.com/media/9b04fd_62e111500eef4ac9a1c0ad0bced21193~mv2.jpg',
     priceRange: '$75K – $110K',
     completionTime: '3 – 5 months',
+    modelUrl: '',
   },
 ];
